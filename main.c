@@ -3,11 +3,6 @@
 
 #include <avr/io.h>
 #include <avr/interrupt.h>
-#include <avr/wdt.h>
-#include <util/delay.h>
-
-#define BAUD 115200
-#include <util/setbaud.h>
 
 #include "uart.h"
 
@@ -62,22 +57,25 @@ ISR(TCA0_OVF_vect)
 	{ \
 		/* g_sensors[0].riseTime = TCB0.CCMP; */ \
 		/* g_sensors[0].state = SENSOR_STATE_RISEN; */ \
-		asm volatile("push r24             \n\t" \
-		             "push r30             \n\t" \
-		             "push r31             \n\t" \
-		             "ldi  r30, lo8(%1)    \n\t"  /* Z = &g_sensors[x] */ \
-		             "ldi  r31, hi8(%1)    \n\t" \
-		             "lds  r24, %0         \n\t"  /* r24 = TCBx_CCMPL */ \
-		             "std  Z+1, r24        \n\t" \
-	       	             "lds  r24, %0+1       \n\t"  /* r24 = TCBx_CCMPH */ \
-		             "std  Z+2, r24        \n\t" \
-		             "ldi  r24, 1          \n\t"  /* r24 = SENSOR_STATE_RISEN */ \
-		             "st   Z,   r24        \n\t" \
-		             "pop  r31             \n\t" \
-		             "pop  r30             \n\t" \
-		             "pop  r24             \n\t" \
-		             "reti                 \n\t" \
-		             : : "i" (_SFR_IO_ADDR(TCB##x##_CCMP)), "i" (&g_sensors[x])); \
+		asm volatile( \
+			       /* "sbi  0x15, 5         \n\t" */ \
+			        "push r24             \n\t" \
+			        "push r30             \n\t" \
+			        "push r31             \n\t" \
+			        "ldi  r30, lo8(%1)    \n\t"  /* Z = &g_sensors[x] */ \
+			        "ldi  r31, hi8(%1)    \n\t" \
+			        "lds  r24, %0         \n\t"  /* r24 = TCBx_CCMPL */ \
+			        "std  Z+1, r24        \n\t" \
+		       	        "lds  r24, %0+1       \n\t"  /* r24 = TCBx_CCMPH */ \
+			        "std  Z+2, r24        \n\t" \
+			        "ldi  r24, 1          \n\t"  /* r24 = SENSOR_STATE_RISEN */ \
+			        "st   Z,   r24        \n\t" \
+			        "pop  r31             \n\t" \
+			        "pop  r30             \n\t" \
+			        "pop  r24             \n\t" \
+			       /* "cbi  0x15, 5         \n\t" */ \
+			        "reti                 \n\t" \
+			        : : "i" (_SFR_IO_ADDR(TCB##x##_CCMP)), "i" (&g_sensors[x])); \
 	}
 TCB_ISR(0);
 TCB_ISR(1);
@@ -91,6 +89,7 @@ ISR(PORTA_PORT_vect)
 	uint16_t count = TCB0.CNT;
 	uint8_t  triggered = VPORTA.INTFLAGS;
 
+//VPORTF.OUT |= 64;
 	// clear the flags so we know if another edge
 	// arrives while we're working
 	VPORTA.INTFLAGS |= triggered;
@@ -134,30 +133,44 @@ ISR(PORTA_PORT_vect)
 		triggered = VPORTA.INTFLAGS;
 		VPORTA.INTFLAGS |= triggered;
 	}
+//VPORTF.OUT &= ~64;
 }
 
-uint8_t decodePulseWidth(uint16_t width)
+// decodePulseWidth returns:
+//     PULSE_TYPE_SWEEP (0xff)   for short sweep pulses
+//     0x00 -> 0x07              for data from valid sync pulses
+//     PULSE_TYPE_INVALID (0xf0) for pulses that are too long
+//
+// Pulse encoding info originally from: 
+// https://github.com/nairol/LighthouseRedox/blob/master/docs/Light%20Emissions.md
+//
+//                      documented     observed     tick window with  
+// skip | data | axis |  length uS | center ticks | (x - 309) / 51.2 
+// -----+------+------+------------+--------------+-------------------
+//    0 |    0 |    0 |       62.5 |    334 +/- 5 |       309 -> 359 
+//    0 |    0 |    1 |       72.9 |    386 +/- 4 |       360 -> 410 
+//    0 |    1 |    0 |       83.3 |    438 +/- 5 |       411 -> 461 
+//    0 |    1 |    1 |       93.8 |    490 +/- 5 |       462 -> 512 
+//    1 |    0 |    0 |      104.0 |    542 +/- 4 |       513 -> 563 
+//    1 |    0 |    1 |      115.0 |    594 +/- 5 |       564 -> 615 
+//    1 |    1 |    0 |      125.0 |    646 +/- 5 |       616 -> 666 
+//    1 |    1 |    1 |      135.0 |    698 +/- 4 |       667 -> 717 
+//
+// Using 5Mhz clock tick is 0.2uS
+// 52 ticks between centers: (x * 5) / 256 = x / 51.2 = close enough
+// width - 309 centers observed data in the length windows
+//
+uint8_t decodePulseWidth(int16_t width)
 {
-	if(width < 100)
+	uint8_t result;
+
+	width = width - 309;
+	if(width < 0)
 		return PULSE_TYPE_SWEEP;
-	else if(width < 356)
-		return 0;
-	else if(width < 408)
-		return 1;
-	else if(width < 460)
-		return 2;
-	else if(width < 512)
-		return 3;
-	else if(width < 564)
-		return 4;
-	else if(width < 616)
-		return 5;
-	else if(width < 668)
-		return 6;
-	else if(width < 720)
-		return 7;
-	else
-		return PULSE_TYPE_INVALID;
+	result = ((width << 2) + width) >> 8;
+	if(result > 7)
+		result = PULSE_TYPE_INVALID;
+	return result;
 }
 
 void processSensor(uint8_t sensorIndex)
@@ -191,7 +204,9 @@ printf("TOT\r\n");
 
 		if(data == PULSE_TYPE_SWEEP && sensor->currentAxis != AXIS_INVALID)
 		{
-			sensor->angles[sensor->currentAxis] = riseTime - sensor->startTime;
+			// average with the last value for a small amount of smoothing
+			sensor->angles[sensor->currentAxis] += riseTime - sensor->startTime;
+			sensor->angles[sensor->currentAxis] >>= 1;
 			sensor->currentAxis = AXIS_INVALID;
 		}
 		else if(data == PULSE_TYPE_INVALID)
@@ -270,6 +285,9 @@ int main()
 	PORTA.PIN5CTRL = 3; // interrupt on falling edge
 	PORTA.PIN6CTRL = 3; // interrupt on falling edge
 	PORTA.PIN7CTRL = 3; // interrupt on falling edge
+
+	PORTF.OUT=0;
+	PORTF.DIR=64|32;
 
 	PORTA.OUT = 1;      // Make USART0 pins outputs
         PORTA.DIR = 0xF;
