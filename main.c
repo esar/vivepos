@@ -30,18 +30,28 @@
 
 typedef struct
 {
+	uint8_t  pos;
+	uint16_t  length;
+	uint8_t  shiftCount;
+	uint16_t shiftRegister;
+	uint8_t  frameBit;
+	uint8_t  data[0x30];
+
+} ootx_t;
+
+typedef struct
+{
 	volatile uint8_t  state;
 	volatile uint16_t riseTime;
 	volatile uint16_t fallTime;
 
-	uint16_t lastAngles[4];
 	uint16_t angles[4];
 	uint16_t startTime;
 	uint8_t  currentAxis;
-	uint8_t  changed;
 
 } sensor_t;
 
+static ootx_t   g_ootx;
 static sensor_t g_sensors[NUM_SENSORS];
 static uint8_t g_time = 0;
 
@@ -156,7 +166,7 @@ ISR(PORTA_PORT_vect)
 //    1 |    1 |    0 |      125.0 |    646 +/- 5 |       616 -> 666 
 //    1 |    1 |    1 |      135.0 |    698 +/- 4 |       667 -> 717 
 //
-// Using 5Mhz clock tick is 0.2uS
+// Using 5Mhz clock, tick is 0.2uS
 // 52 ticks between centers: (x * 5) / 256 = x / 51.2 = close enough
 // width - 309 centers observed data in the length windows
 //
@@ -173,7 +183,7 @@ uint8_t decodePulseWidth(int16_t width)
 	return result;
 }
 
-void processSensor(uint8_t sensorIndex)
+uint8_t pollSensor(uint8_t sensorIndex)
 {
 	sensor_t* sensor = &g_sensors[sensorIndex];
 
@@ -210,7 +220,6 @@ printf("TOT\r\n");
 			sensor->currentAxis = AXIS_INVALID;
 		}
 		else if(data == PULSE_TYPE_INVALID)
-			//printf("too large: %u, %u, %u\r\n", riseTime, width, data);
 			printf("LRG %u\r\n", width);
 		else if(!PULSE_DATA_SKIP(data))
 		{
@@ -218,21 +227,58 @@ printf("TOT\r\n");
 			sensor->startTime = riseTime;
 		}
 
-/*
-		if(sensor->angles[sensor->currentAxis] > sensor->lastAngles[sensor->currentAxis] + CHANGE_THRESHOLD || 
-		   sensor->angles[sensor->currentAxis] < sensor->lastAngles[sensor->currentAxis] - CHANGE_THRESHOLD)
-		{
-			sensor->changed = 1;
-			sensor->lastAngles[sensor->currentAxis] = sensor->angles[sensor->currentAxis];
-		}
-
-		if(sensor->changed)
-		{
-			printf("%u: X: %u, Y: %u\r\n", sensorIndex, sensor->angles[0], sensor->angles[1]);
-			sensor->changed = 0;
-		}
-*/
+		if((data & 0xF0) == 0)
+			return PULSE_DATA_DATA(data);
 	}
+
+	return 0xff;
+}
+
+void ootxAddBit(uint8_t bit)
+{
+	if((bit & 1) && g_ootx.shiftRegister == 0 && g_ootx.frameBit == 0)
+	{
+		// got preamble
+		g_ootx.pos = 0;
+		g_ootx.length = 0;
+		g_ootx.shiftCount = 0;
+	}
+	else if(g_ootx.shiftCount == 17)
+	{
+		g_ootx.shiftCount = 0;
+		if((bit & 1) == 0)// || g_ootx.frameBit == 0)
+			g_ootx.length = 0xff;  // abort
+
+		// end of word
+		if(g_ootx.length == 0)
+		{
+			g_ootx.length = (g_ootx.shiftRegister << 8) | (g_ootx.shiftRegister >> 8);
+			g_ootx.length += 2;  // add checksum to length
+		}
+		else if(g_ootx.length != 0xff)
+		{
+			if(g_ootx.pos < g_ootx.length && g_ootx.pos < sizeof(g_ootx.data))
+			{
+				g_ootx.data[g_ootx.pos++] = g_ootx.shiftRegister >> 8;
+				g_ootx.data[g_ootx.pos++] = g_ootx.shiftRegister & 0xFF;
+			}
+			else
+			{
+/*
+				printf("OOTX: %u: ", g_ootx.length);
+				for(g_ootx.pos = 0; g_ootx.pos < g_ootx.length; ++g_ootx.pos)
+					printf("%02x ", g_ootx.data[g_ootx.pos]);
+				printf("\r\n");
+
+				g_ootx.length = 0xff;
+*/
+			}
+		}
+	}
+
+	g_ootx.frameBit = g_ootx.shiftRegister >> 15;
+	g_ootx.shiftRegister = (g_ootx.shiftRegister << 1) | ((bit & 1));
+	g_ootx.shiftCount = (g_ootx.shiftCount + 1);
 }
 
 int main()
@@ -297,14 +343,18 @@ int main()
 
 	for(;;)
 	{
+		uint8_t ootxBit;
 		uint16_t now;
 		int sensorIndex;
 
 		for(sensorIndex = 0; sensorIndex < NUM_SENSORS; ++sensorIndex)
-			processSensor(sensorIndex);
+			ootxBit = pollSensor(sensorIndex);
+
+		if(ootxBit != 0xFF)
+			ootxAddBit(ootxBit);
 
 		now = g_time;
-		if(now - lastReportTime > REPORT_INTERVAL)
+		if(now - lastReportTime > REPORT_INTERVAL*4)
 		{
 			for(sensorIndex = 0; sensorIndex < NUM_SENSORS; ++sensorIndex)
 				printf("(%u, %u, %u)\r\n", sensorIndex, g_sensors[sensorIndex].angles[0], g_sensors[sensorIndex].angles[1]);
