@@ -7,16 +7,19 @@
 #include "uart.h"
 
 #define F_TIMER              ((F_CPU) / 4)
+#define MICROSECONDS_IN_TICKS(x) ((uint16_t)((x) / 0.2))
 #define NUM_SENSORS          4
 
 #define PULSE_TYPE_SYNC      0x00
 #define PULSE_TYPE_SWEEP     0x10
 #define PULSE_TYPE_INVALID   0xf0
+#define PULSE_HAS_DATA(x)    (((x) & 0xF0) == 0)
 #define PULSE_DATA_AXIS(x)   ((x) & 1)
-#define PULSE_DATA_DATA(x)   (((x) & 2) >> 1)
-#define PULSE_DATA_SKIP(x)   ((x) & 4)
+#define PULSE_DATA_DATA(x)   (((x) >> 1) & 1)
+#define PULSE_DATA_SKIP(x)   (((x) >> 2) & 1)
+#define PULSE_DATA_INVALID   0xFF
 
-#define AXIS_INVALID         0xFF
+#define ANGLE_INVALID        0xFF
 
 #define CHANGE_THRESHOLD     10
 #define SENSOR_TIMEOUT       1000
@@ -25,13 +28,17 @@
 #define SENSOR_STATE_RISEN   1
 #define SENSOR_STATE_FALLEN  2
 
+#define NUM_LIGHTHOUSES      2
+#define NUM_AXES             2
+#define NUM_ANGLES           (NUM_LIGHTHOUSES * NUM_AXES)
+
 // tested against a 76 ticks per second clock (20,000,000 / 4 / 65536)
 #define REPORT_INTERVAL      15
 
 typedef struct
 {
 	uint8_t  pos;
-	uint16_t  length;
+	uint16_t length;
 	uint8_t  shiftCount;
 	uint16_t shiftRegister;
 	uint8_t  frameBit;
@@ -45,9 +52,10 @@ typedef struct
 	volatile uint16_t riseTime;
 	volatile uint16_t fallTime;
 
-	uint16_t angles[4];
+	uint16_t angles[NUM_ANGLES];
 	uint16_t startTime;
-	uint8_t  currentAxis;
+	uint16_t firstPulseTime;
+	uint8_t  currentAngle;
 
 } sensor_t;
 
@@ -185,11 +193,12 @@ uint8_t decodePulseWidth(int16_t width)
 
 uint8_t pollSensor(uint8_t sensorIndex)
 {
+	uint16_t now;
 	sensor_t* sensor = &g_sensors[sensorIndex];
 
 	if(sensor->state == SENSOR_STATE_RISEN)
 	{
-		uint16_t now = TCA0.SINGLE.CNT;
+		now = TCA0.SINGLE.CNT;
 		if(now - sensor->riseTime > SENSOR_TIMEOUT)
 		{
 			sensor->fallTime = sensor->riseTime + 1;
@@ -210,28 +219,61 @@ printf("TOT\r\n");
 
 		data = decodePulseWidth(width);
 
-		//printf("%u, %u, %u\r\n", riseTime, width, data);
+		//printf("%u, %u, %u, %u\r\n", sensorIndex, riseTime, width, data);
 
-		if(data == PULSE_TYPE_SWEEP && sensor->currentAxis != AXIS_INVALID)
+		if(data == PULSE_TYPE_INVALID)
 		{
-			// average with the last value for a small amount of smoothing
-			sensor->angles[sensor->currentAxis] += riseTime - sensor->startTime;
-			sensor->angles[sensor->currentAxis] >>= 1;
-			sensor->currentAxis = AXIS_INVALID;
-		}
-		else if(data == PULSE_TYPE_INVALID)
 			printf("LRG %u\r\n", width);
-		else if(!PULSE_DATA_SKIP(data))
-		{
-			sensor->currentAxis = PULSE_DATA_AXIS(data);
-			sensor->startTime = riseTime;
+			return PULSE_DATA_INVALID;
 		}
 
-		if((data & 0xF0) == 0)
+		if(data == PULSE_TYPE_SWEEP)
+		{
+			if(sensor->currentAngle < NUM_ANGLES)
+			{
+				sensor->angles[sensor->currentAngle] += riseTime - sensor->startTime;
+				sensor->angles[sensor->currentAngle] >>= 1;
+				sensor->currentAngle = ANGLE_INVALID;
+			}
+		}
+		else
+		{
+			uint16_t ticksSinceFirstPulse = riseTime - sensor->firstPulseTime;
+			uint8_t lighthouse;
+
+			if((ticksSinceFirstPulse >= MICROSECONDS_IN_TICKS(300) && 
+			    ticksSinceFirstPulse <= MICROSECONDS_IN_TICKS(500)))
+			{
+				lighthouse = 1;
+				sensor->firstPulseTime = riseTime - MICROSECONDS_IN_TICKS(400);
+			}
+			else
+			{
+				// Doesn't fit timing of second lighthouse, so it's either the first
+				// or we're out of sync and might as well consider it the first
+				lighthouse = 0;
+				sensor->firstPulseTime = riseTime;
+			}
+
+			if(!PULSE_DATA_SKIP(data))
+			{
+				sensor->currentAngle = (lighthouse << 1) | PULSE_DATA_AXIS(data);
+				sensor->startTime = riseTime;
+			}
+		}
+
+		if(PULSE_HAS_DATA(data))
 			return PULSE_DATA_DATA(data);
 	}
 
-	return 0xff;
+	// If no pulse for more than 8333uS then move sensor->firstPulseTime
+	// on by one cycle to try and stay locked while we're out of sight
+	// of the lighthouses
+	now = TCA0.SINGLE.CNT;
+	if(now - sensor->firstPulseTime > MICROSECONDS_IN_TICKS(8333 + 200))
+		sensor->firstPulseTime += MICROSECONDS_IN_TICKS(8333);
+
+	return PULSE_DATA_INVALID;
 }
 
 void ootxAddBit(uint8_t bit)
@@ -350,14 +392,21 @@ int main()
 		for(sensorIndex = 0; sensorIndex < NUM_SENSORS; ++sensorIndex)
 			ootxBit = pollSensor(sensorIndex);
 
-		if(ootxBit != 0xFF)
+		if(ootxBit != PULSE_DATA_INVALID)
 			ootxAddBit(ootxBit);
 
 		now = g_time;
 		if(now - lastReportTime > REPORT_INTERVAL*4)
 		{
 			for(sensorIndex = 0; sensorIndex < NUM_SENSORS; ++sensorIndex)
-				printf("(%u, %u, %u)\r\n", sensorIndex, g_sensors[sensorIndex].angles[0], g_sensors[sensorIndex].angles[1]);
+			{
+				printf("(%u, %u, %u, %u, %u)\r\n", 
+				       sensorIndex, 
+				       g_sensors[sensorIndex].angles[0], 
+				       g_sensors[sensorIndex].angles[1],
+				       g_sensors[sensorIndex].angles[2],
+				       g_sensors[sensorIndex].angles[3]);
+			}
 			lastReportTime = now;
 		}
 	}
