@@ -114,6 +114,16 @@ ISR(PORTA_PORT_vect)
 
 	while(triggered)
 	{
+		// Make sure we've got all the rising edges first
+		if(TCB0.INTFLAGS & 1)
+			TCB0_INT_vect();
+		if(TCB1.INTFLAGS & 1)
+			TCB1_INT_vect();
+		if(TCB2.INTFLAGS & 1)
+			TCB2_INT_vect();
+		if(TCB3.INTFLAGS & 1)
+			TCB3_INT_vect();
+
 		if(triggered & (1 << (4+0)))
 		{
 			if(g_sensors[0].state == SENSOR_STATE_RISEN)
