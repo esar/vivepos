@@ -32,6 +32,8 @@
 #define NUM_AXES             2
 #define NUM_ANGLES           (NUM_LIGHTHOUSES * NUM_AXES)
 
+#define OOTX_MAX_DATA        0x30
+
 // tested against a 76 ticks per second clock (20,000,000 / 4 / 65536)
 #define REPORT_INTERVAL      15
 
@@ -42,9 +44,16 @@ typedef struct
 	uint8_t  shiftCount;
 	uint16_t shiftRegister;
 	uint8_t  frameBit;
-	uint8_t  data[0x30];
+	uint8_t  data[OOTX_MAX_DATA];
 
 } ootx_t;
+
+typedef struct
+{
+	uint8_t length;
+	uint8_t data[OOTX_MAX_DATA];
+
+} ootx_msg_t;
 
 typedef struct
 {
@@ -57,9 +66,11 @@ typedef struct
 	uint16_t firstPulseTime;
 	uint8_t  currentAngle;
 
+	ootx_t ootx[NUM_LIGHTHOUSES];
+
 } sensor_t;
 
-static ootx_t   g_ootx;
+static ootx_msg_t g_lighthouseOotx[NUM_LIGHTHOUSES];
 static sensor_t g_sensors[NUM_SENSORS];
 static uint8_t g_time = 0;
 
@@ -201,7 +212,52 @@ uint8_t decodePulseWidth(int16_t width)
 	return result;
 }
 
-uint8_t pollSensor(uint8_t sensorIndex)
+uint8_t ootxAddBit(ootx_t* ootx, uint8_t bit)
+{
+	uint8_t result = 0; // msg not ready
+
+	if((bit & 1) && ootx->shiftRegister == 0 && ootx->frameBit == 0)
+	{
+		// got preamble
+		ootx->pos = 0;
+		ootx->length = 0;
+		ootx->shiftCount = 0;
+	}
+	else if(ootx->shiftCount == 17)
+	{
+		ootx->shiftCount = 0;
+		if((bit & 1) == 0)// || ootx->frameBit == 0)
+			ootx->length = 0xff;  // abort
+
+		// end of word
+		if(ootx->length == 0)
+		{
+			ootx->length = (ootx->shiftRegister << 8) | (ootx->shiftRegister >> 8);
+			ootx->length += 2;  // add checksum to length
+		}
+		else if(ootx->length != 0xff)
+		{
+			if(ootx->pos < ootx->length && ootx->pos < sizeof(ootx->data))
+			{
+				ootx->data[ootx->pos++] = ootx->shiftRegister >> 8;
+				ootx->data[ootx->pos++] = ootx->shiftRegister & 0xFF;
+			}
+			else
+			{
+				result = ootx->length;
+				ootx->length = 0xff;
+			}
+		}
+	}
+
+	ootx->frameBit = ootx->shiftRegister >> 15;
+	ootx->shiftRegister = (ootx->shiftRegister << 1) | ((bit & 1));
+	ootx->shiftCount = (ootx->shiftCount + 1);
+
+	return result;
+}
+
+void pollSensor(uint8_t sensorIndex)
 {
 	uint16_t now;
 	sensor_t* sensor = &g_sensors[sensorIndex];
@@ -234,7 +290,7 @@ printf("TOT\r\n");
 		if(data == PULSE_TYPE_INVALID)
 		{
 			printf("LRG %u\r\n", width);
-			return PULSE_DATA_INVALID;
+			return;
 		}
 
 		if(data == PULSE_TYPE_SWEEP)
@@ -270,10 +326,27 @@ printf("TOT\r\n");
 				sensor->currentAngle = (lighthouse << 1) | PULSE_DATA_AXIS(data);
 				sensor->startTime = riseTime;
 			}
+			ootxMsgLength = ootxAddBit(&sensor->ootx[lighthouse], PULSE_DATA_DATA(data));
+			if(ootxMsgLength > 0)
+			{
+				//if(g_lighthouseOotx[lighthouse].length != length ||
+				//   memcmp(g_lighthouseOotx[lighthouse].data, 
+				//          sensor->ootx[lighthouse].data, length) != 0)
+				{
+					g_lighthouseOotx[lighthouse].length = ootxMsgLength;
+					memcpy(g_lighthouseOotx[lighthouse].data, 
+					       sensor->ootx[lighthouse].data, 
+					       ootxMsgLength);
+				}
+
+				printf("OOTX: %u/%u: %u: ", sensorIndex, lighthouse, g_lighthouseOotx[lighthouse].length);
+				//for(ootxMsgLength = 0; ootxMsgLength < g_lighthouseOotx[lighthouse].length; ++ootxMsgLength)
+				//	printf("%02x ", g_lighthouseOotx[lighthouse].data[ootxMsgLength]);
+				printf("\r\n");
+			}
 		}
 
-		if(PULSE_HAS_DATA(data))
-			return PULSE_DATA_DATA(data);
+		return;
 	}
 
 	// If no pulse for more than 8333uS then move sensor->firstPulseTime
@@ -282,55 +355,6 @@ printf("TOT\r\n");
 	now = TCA0.SINGLE.CNT;
 	if(now - sensor->firstPulseTime > MICROSECONDS_IN_TICKS(8333 + 200))
 		sensor->firstPulseTime += MICROSECONDS_IN_TICKS(8333);
-
-	return PULSE_DATA_INVALID;
-}
-
-void ootxAddBit(uint8_t bit)
-{
-	if((bit & 1) && g_ootx.shiftRegister == 0 && g_ootx.frameBit == 0)
-	{
-		// got preamble
-		g_ootx.pos = 0;
-		g_ootx.length = 0;
-		g_ootx.shiftCount = 0;
-	}
-	else if(g_ootx.shiftCount == 17)
-	{
-		g_ootx.shiftCount = 0;
-		if((bit & 1) == 0)// || g_ootx.frameBit == 0)
-			g_ootx.length = 0xff;  // abort
-
-		// end of word
-		if(g_ootx.length == 0)
-		{
-			g_ootx.length = (g_ootx.shiftRegister << 8) | (g_ootx.shiftRegister >> 8);
-			g_ootx.length += 2;  // add checksum to length
-		}
-		else if(g_ootx.length != 0xff)
-		{
-			if(g_ootx.pos < g_ootx.length && g_ootx.pos < sizeof(g_ootx.data))
-			{
-				g_ootx.data[g_ootx.pos++] = g_ootx.shiftRegister >> 8;
-				g_ootx.data[g_ootx.pos++] = g_ootx.shiftRegister & 0xFF;
-			}
-			else
-			{
-/*
-				printf("OOTX: %u: ", g_ootx.length);
-				for(g_ootx.pos = 0; g_ootx.pos < g_ootx.length; ++g_ootx.pos)
-					printf("%02x ", g_ootx.data[g_ootx.pos]);
-				printf("\r\n");
-
-				g_ootx.length = 0xff;
-*/
-			}
-		}
-	}
-
-	g_ootx.frameBit = g_ootx.shiftRegister >> 15;
-	g_ootx.shiftRegister = (g_ootx.shiftRegister << 1) | ((bit & 1));
-	g_ootx.shiftCount = (g_ootx.shiftCount + 1);
 }
 
 int main()
@@ -395,15 +419,13 @@ int main()
 
 	for(;;)
 	{
-		uint8_t ootxBit;
 		uint16_t now;
 		int sensorIndex;
 
 		for(sensorIndex = 0; sensorIndex < NUM_SENSORS; ++sensorIndex)
-			ootxBit = pollSensor(sensorIndex);
-
-		if(ootxBit != PULSE_DATA_INVALID)
-			ootxAddBit(ootxBit);
+		{
+			pollSensor(sensorIndex);
+		}
 
 		now = g_time;
 		if(now - lastReportTime > REPORT_INTERVAL*4)
