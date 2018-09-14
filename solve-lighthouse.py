@@ -9,12 +9,12 @@ import numpy as np
 from sympy import *
 
 TICK_CLOCK_MHZ = 5.0
-SWEEP_CENTER_IN_TICKS = 4000
-SWEEP_180_IN_TICKS = 8333
+SWEEP_CENTER_IN_MICROSEC = 4000
+SWEEP_180_IN_MICROSEC = 8333
 
 
 def ticks2angle(ticks):
-	return math.pi * (ticks / TICK_CLOCK_MHZ - SWEEP_CENTER_IN_TICKS) / SWEEP_180_IN_TICKS
+	return math.pi * (ticks / TICK_CLOCK_MHZ - SWEEP_CENTER_IN_MICROSEC) / SWEEP_180_IN_MICROSEC
 
 
 def angles2vector(xAngle, yAngle):
