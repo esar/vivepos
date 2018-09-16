@@ -273,7 +273,9 @@ uint8_t pollSensor(uint8_t sensorIndex)
 		{
 			sensor->fallTime = sensor->riseTime + 1;
 			sensor->state = SENSOR_STATE_FALLEN;
-printf("TOT\r\n");
+//printf("TOT\r\n");
+VPORTF.OUT |= 16;
+VPORTF.OUT &= ~16;
 		}
 	}
 
