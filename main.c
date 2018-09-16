@@ -353,9 +353,11 @@ VPORTF.OUT &= ~16;
 		else if(now - sensor->firstPulseTime > MICROSECONDS_IN_TICKS(600) &&
 		        now - sensor->firstPulseTime < MICROSECONDS_IN_TICKS(800))
 		{
-			// Let the caller know that we're in the 1000uS processing
-			// window at the end of the cycle where we don't expect any
-			// pulses and can risk not being called for a while 
+			// Let the caller know that we're in the processing window
+			// after the sync pulses where we don't expect more than one
+			// further pulse (the sweep) in this cycle. This means we can
+			// risk not being called for a while, because we won't miss
+			// a pulse if more than one occur before we're next called
 			return 1;
 		}
 	}
