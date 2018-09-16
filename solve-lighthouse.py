@@ -5,6 +5,9 @@ import sys
 import math
 import argparse
 import serial
+import struct
+import binascii
+import collections
 import numpy as np
 import scipy.optimize
 
@@ -185,6 +188,29 @@ def solve(sensorGrid, sensorTicks):
 	}
 
 
+def rotateForGravity(solution1, solution2, ootx1, ootx2):
+	v1 = np.double([ootx1['accel_dir_x'], ootx1['accel_dir_y'], ootx1['accel_dir_z']])
+	v1 /= np.linalg.norm(v1)
+	v1 = solution1['rotation'].dot(v1)
+
+	v2 = np.double([ootx2['accel_dir_x'], ootx2['accel_dir_y'], ootx2['accel_dir_z']])
+	v2 /= np.linalg.norm(v2)
+	v2 = solution2['rotation'].dot(v2)
+
+	vAverage = (v1 + v1) / 2
+	rotationMatrix = calcRotationMatrix(vAverage, np.double([0, 0, -1]))
+
+	solution1['rotation'] = rotationMatrix.dot(solution1['rotation'])
+	solution1['origin'] = rotationMatrix.dot(solution1['origin'])
+	for i in range(len(solution1['sensorPoints'])):
+		solution1['sensorPoints'][i] = rotationMatrix.dot(solution1['sensorPoints'][i])
+
+	solution2['rotation'] = rotationMatrix.dot(solution2['rotation'])
+	solution2['origin'] = rotationMatrix.dot(solution2['origin'])
+	for i in range(len(solution2['sensorPoints'])):
+		solution2['sensorPoints'][i] = rotationMatrix.dot(solution2['sensorPoints'][i])
+
+
 def intersectLines(origin1, ray1, origin2, ray2):
 	w0 = origin1 - origin2
 	a = ray1[0]*ray1[0] + ray1[1]*ray1[1] + ray1[2]*ray1[2]
@@ -241,6 +267,17 @@ def verify(sensorGrid, ticks1, ticks2, lighthouse1, lighthouse2):
 			print "sensor %u: error, rays are parallel" % i
 
 
+def decodeOotx(data):
+	data = data[0:33*2]
+	Record = collections.namedtuple('v6', 
+		'fw_version id fcal_0_phase fcal_1_phase fcal_0_tilt fcal_1_tilt ' +
+		'sys_unlock_count hw_version fcal_0_curve fcal_1_curve accel_dir_x ' +
+		'accel_dir_y accel_dir_z fcal_0_gibphase fcal_1_gibphase fcal_0_gibmag ' +
+		'fcal_1_gibmag mode_current sys_faults'
+	)
+	return Record._asdict(Record._make(struct.unpack('<HIhhhhBBhhbbbhhhhBB', binascii.unhexlify(data))))
+
+
 def dumpAngle(line):
 	data = line.split(',', 4)
 	if len(data) == 5:
@@ -252,7 +289,12 @@ def dumpPosition(line):
 		print "%s:    X: %8s    Y: %8s    Z: %8s    err: %s" % tuple(data)
 
 def dumpOotx(line):
-	print line
+	data = line.split(',')
+	if len(data) == 3:
+		r = decodeOotx(data[2])
+		print "Lighthouse %s:" % data[0]
+		for name, value in r.iteritems():
+			print "\t%s: %s" % (name, value)
 
 def dumpData(input, sensor, angles, ootx, position):
 	while True:
@@ -272,16 +314,18 @@ def dumpData(input, sensor, angles, ootx, position):
 			dumpOotx(line[2:-1])
 
 
-def collectSamples(input, count):
+def collectSamples(input, count, collectOOTX=True):
+	lighthouse1 = {'ootx':None, 'angles':None}
+	lighthouse2 = {'ootx':None, 'angles':None}
 	total = 0
 	counts = [0, 0, 0, 0]
-	lighthouse1 = [
+	lighthouse1Angles = [
 		[0, 0],
 		[0, 0],
 		[0, 0],
 		[0, 0]
 	]
-	lighthouse2 = [
+	lighthouse2Angles = [
 		[0, 0],
 		[0, 0],
 		[0, 0],
@@ -289,37 +333,49 @@ def collectSamples(input, count):
 	]
 
 	n = 0
-	while n < count:
+	while n < count or (collectOOTX and (lighthouse1['ootx'] == None or lighthouse2['ootx'] == None)):
 		line = input.readline()
+		sys.stderr.write('.')
 
-		if not line.startswith('A:'):
+		if line.startswith('D:'):
+			data = line[2:-1].split(',')
+			if len(data) == 3:
+				lh = int(data[0])
+				if lh == 0 and lighthouse1['ootx'] == None:
+					sys.stderr.write('O1')
+					lighthouse1['ootx'] = decodeOotx(data[2])
+				elif lh == 1 and lighthouse2['ootx'] == None:
+					sys.stderr.write('O2')
+					lighthouse2['ootx'] = decodeOotx(data[2])
+			
+		if not line.startswith('A:') or n >= count:
 			continue
 		line = line[2:-1]
 
-		#line = line[line.find('(') + 1 : line.rfind(')')]
 		cols = line.split(',', 6)
-
 		i = int(cols[0])
-		if i < 0 or i > len(lighthouse1):
+		if i < 0 or i > len(lighthouse1Angles):
 			continue
 
 		total += 1
 		counts[i] += 1
-		lighthouse1[i][0] += int(cols[1])
-		lighthouse1[i][1] += int(cols[2])
-		lighthouse2[i][0] += int(cols[3])
-		lighthouse2[i][1] += int(cols[4])
+		lighthouse1Angles[i][0] += int(cols[1])
+		lighthouse1Angles[i][1] += int(cols[2])
+		lighthouse2Angles[i][0] += int(cols[3])
+		lighthouse2Angles[i][1] += int(cols[4])
 
-		sys.stderr.write('.')
 		n += 1
 
 	sys.stdout.write('\n')
 
 	for i in range(4):
-		lighthouse1[i][0] /= counts[i]
-		lighthouse1[i][1] /= counts[i]
-		lighthouse2[i][0] /= counts[i]
-		lighthouse2[i][1] /= counts[i]
+		lighthouse1Angles[i][0] /= counts[i]
+		lighthouse1Angles[i][1] /= counts[i]
+		lighthouse2Angles[i][0] /= counts[i]
+		lighthouse2Angles[i][1] /= counts[i]
+
+	lighthouse1['angles'] = lighthouse1Angles
+	lighthouse2['angles'] = lighthouse2Angles
 
 	return (lighthouse1, lighthouse2)
 
@@ -410,6 +466,9 @@ parser.add_argument('--count', type=int,
 parser.add_argument('--grid', type=int,
 	help='sensor grid spacing in mm (default 60)',
 	default=60)
+parser.add_argument('--no-gravity', action='store_true',
+	help='don\'t rotate the solution so that down matches lighthouse accelerometers',
+	default=False)
 parser.add_argument('--verify', action='store_true',
 	help='verify result by triangulating sensor positions',
 	default=False)
@@ -443,9 +502,11 @@ if args.dump_angles or args.dump_ootx or args.dump_pos:
 	dumpData(input, args.dump_sensor, args.dump_angles, args.dump_ootx, args.dump_pos)
 	sys.exit(1)
 
-lighthouse1, lighthouse2 = collectSamples(input, args.count)
-solution1 = solve(args.grid, lighthouse1)
-solution2 = solve(args.grid, lighthouse2)
+lighthouse1, lighthouse2 = collectSamples(input, args.count, not args.no_gravity)
+solution1 = solve(args.grid, lighthouse1['angles'])
+solution2 = solve(args.grid, lighthouse2['angles'])
+if not args.no_gravity:
+	rotateForGravity(solution1, solution2, lighthouse1['ootx'], lighthouse2['ootx'])
 
 if args.format == 'text':
 	printSolutionText((solution1, solution2))
