@@ -18,8 +18,8 @@ def ticks2angle(ticks):
 
 
 def angles2vector(xAngle, yAngle):
-	plane1 = np.double([+cos(xAngle), 0, -sin(xAngle)])
-	plane2 = np.double([0, +cos(yAngle), +sin(yAngle)])
+	plane1 = np.double([+math.cos(xAngle), 0, -math.sin(xAngle)])
+	plane2 = np.double([0, +math.cos(yAngle), +math.sin(yAngle)])
 	vector = np.cross(plane2, plane1)
 	vector /= np.linalg.norm(vector)
 	return vector
