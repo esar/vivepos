@@ -1,5 +1,5 @@
 PRG            = image
-OBJ            = main.o uart.o
+OBJ            = main.o uart.o position.o
 
 MCU_TARGET     = atmega3209
 OPTIMIZE       = -O3
@@ -20,10 +20,10 @@ OBJDUMP        = /home/stephen/atmel-toolchain/avr8-gnu-toolchain-linux_x86_64/b
 
 ASFLAGS        = -mmcu=$(MCU_TARGET) $(DEFS)
 CFLAGS        = -g -Wall $(OPTIMIZE) -mmcu=$(MCU_TARGET) $(DEFS)
-LDFLAGS       = -Wl,-Map,$(PRG).map
+LDFLAGS       = -Wl,-Map,$(PRG).map -Wl,-u,vfprintf -lprintf_flt -lm
 
 # Strip unused code
-CFLAGS += -ffunction-sections -fno-unroll-loops -fno-inline -fno-jump-tables
+CFLAGS += -ffunction-sections -fno-inline # -fno-unroll-loops -fno-inline -fno-jump-tables
 LDFLAGS += -Wl,-gc-sections  
 
 #LDFLAGS += --cref -nostartfiles

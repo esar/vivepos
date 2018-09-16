@@ -1,10 +1,13 @@
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 
 #include <avr/io.h>
 #include <avr/interrupt.h>
 
 #include "uart.h"
+#include "position.h"
+#include "lighthouse_pos.h"
 
 #define F_TIMER              ((F_CPU) / 4)
 #define MICROSECONDS_IN_TICKS(x) ((uint16_t)((x) / 0.2))
@@ -34,6 +37,7 @@
 
 #define OOTX_MAX_DATA        0x30
 
+// TODO: Use RTC
 // tested against a 76 ticks per second clock (20,000,000 / 4 / 65536)
 #define REPORT_INTERVAL      15
 
@@ -44,12 +48,14 @@ typedef struct
 	uint8_t  shiftCount;
 	uint16_t shiftRegister;
 	uint8_t  frameBit;
+	uint8_t  validLength;
 	uint8_t  data[OOTX_MAX_DATA];
 
 } ootx_t;
 
 typedef struct
 {
+	uint8_t isNew;
 	uint8_t length;
 	uint8_t data[OOTX_MAX_DATA];
 
@@ -61,7 +67,8 @@ typedef struct
 	volatile uint16_t riseTime;
 	volatile uint16_t fallTime;
 
-	uint16_t angles[NUM_ANGLES];
+	uint16_t angleTicks[NUM_ANGLES];
+	_Accum angleRadians[NUM_ANGLES];
 	uint16_t startTime;
 	uint16_t firstPulseTime;
 	uint8_t  currentAngle;
@@ -71,8 +78,8 @@ typedef struct
 } sensor_t;
 
 static ootx_msg_t g_lighthouseOotx[NUM_LIGHTHOUSES];
-static sensor_t g_sensors[NUM_SENSORS];
-static uint8_t g_time = 0;
+static sensor_t   g_sensors[NUM_SENSORS];
+static uint8_t    g_time = 0;
 
 ISR(TCA0_OVF_vect)
 {
@@ -203,7 +210,7 @@ uint8_t decodePulseWidth(int16_t width)
 {
 	uint8_t result;
 
-	width = width - 309;
+	width = width - 296;
 	if(width < 0)
 		return PULSE_TYPE_SWEEP;
 	result = ((width << 2) + width) >> 8;
@@ -212,10 +219,8 @@ uint8_t decodePulseWidth(int16_t width)
 	return result;
 }
 
-uint8_t ootxAddBit(ootx_t* ootx, uint8_t bit)
+void ootxAddBit(ootx_t* ootx, uint8_t bit)
 {
-	uint8_t result = 0; // msg not ready
-
 	if((bit & 1) && ootx->shiftRegister == 0 && ootx->frameBit == 0)
 	{
 		// got preamble
@@ -244,7 +249,8 @@ uint8_t ootxAddBit(ootx_t* ootx, uint8_t bit)
 			}
 			else
 			{
-				result = ootx->length;
+				// TODO: validate checksum
+				ootx->validLength = ootx->length;
 				ootx->length = 0xff;
 			}
 		}
@@ -253,11 +259,9 @@ uint8_t ootxAddBit(ootx_t* ootx, uint8_t bit)
 	ootx->frameBit = ootx->shiftRegister >> 15;
 	ootx->shiftRegister = (ootx->shiftRegister << 1) | ((bit & 1));
 	ootx->shiftCount = (ootx->shiftCount + 1);
-
-	return result;
 }
 
-void pollSensor(uint8_t sensorIndex)
+uint8_t pollSensor(uint8_t sensorIndex)
 {
 	uint16_t now;
 	sensor_t* sensor = &g_sensors[sensorIndex];
@@ -290,15 +294,20 @@ printf("TOT\r\n");
 		if(data == PULSE_TYPE_INVALID)
 		{
 			printf("LRG %u\r\n", width);
-			return;
+			return 0;
 		}
 
 		if(data == PULSE_TYPE_SWEEP)
 		{
 			if(sensor->currentAngle < NUM_ANGLES)
 			{
-				sensor->angles[sensor->currentAngle] += riseTime - sensor->startTime;
-				sensor->angles[sensor->currentAngle] >>= 1;
+				uint16_t delta = riseTime - sensor->startTime;
+
+				sensor->angleTicks[sensor->currentAngle] += delta;
+ 				sensor->angleTicks[sensor->currentAngle] >>= 1;
+				sensor->angleRadians[sensor->currentAngle] = ((_Accum)delta - MICROSECONDS_IN_TICKS(4000)) * (M_PI / MICROSECONDS_IN_TICKS(8333));
+				              
+				//sensor->angleRadians[sensor->currentAngle] *= (M_PI / MICROSECONDS_IN_TICKS(8333));
 				sensor->currentAngle = ANGLE_INVALID;
 			}
 		}
@@ -326,41 +335,149 @@ printf("TOT\r\n");
 				sensor->currentAngle = (lighthouse << 1) | PULSE_DATA_AXIS(data);
 				sensor->startTime = riseTime;
 			}
-			ootxMsgLength = ootxAddBit(&sensor->ootx[lighthouse], PULSE_DATA_DATA(data));
-			if(ootxMsgLength > 0)
-			{
-				//if(g_lighthouseOotx[lighthouse].length != length ||
-				//   memcmp(g_lighthouseOotx[lighthouse].data, 
-				//          sensor->ootx[lighthouse].data, length) != 0)
-				{
-					g_lighthouseOotx[lighthouse].length = ootxMsgLength;
-					memcpy(g_lighthouseOotx[lighthouse].data, 
-					       sensor->ootx[lighthouse].data, 
-					       ootxMsgLength);
-				}
-
-				printf("OOTX: %u/%u: %u: ", sensorIndex, lighthouse, g_lighthouseOotx[lighthouse].length);
-				//for(ootxMsgLength = 0; ootxMsgLength < g_lighthouseOotx[lighthouse].length; ++ootxMsgLength)
-				//	printf("%02x ", g_lighthouseOotx[lighthouse].data[ootxMsgLength]);
-				printf("\r\n");
-			}
+			ootxAddBit(&sensor->ootx[lighthouse], PULSE_DATA_DATA(data));
 		}
-
-		return;
+	}
+	else
+	{
+		now = TCA0.SINGLE.CNT;
+		if(now - sensor->firstPulseTime > MICROSECONDS_IN_TICKS(8333 + 200))
+		{
+			// No pulse for more than 8333uS so move sensor->firstPulseTime
+			// on by one cycle to try and stay locked while we're out of sight
+			// of the lighthouses
+			sensor->firstPulseTime += MICROSECONDS_IN_TICKS(8333);
+		}
+		else if(now - sensor->firstPulseTime > MICROSECONDS_IN_TICKS(600) &&
+		        now - sensor->firstPulseTime < MICROSECONDS_IN_TICKS(800))
+		{
+			// Let the caller know that we're in the 1000uS processing
+			// window at the end of the cycle where we don't expect any
+			// pulses and can risk not being called for a while 
+			return 1;
+		}
 	}
 
-	// If no pulse for more than 8333uS then move sensor->firstPulseTime
-	// on by one cycle to try and stay locked while we're out of sight
-	// of the lighthouses
-	now = TCA0.SINGLE.CNT;
-	if(now - sensor->firstPulseTime > MICROSECONDS_IN_TICKS(8333 + 200))
-		sensor->firstPulseTime += MICROSECONDS_IN_TICKS(8333);
+	return 0;
+}
+
+uint8_t processWindowCalcAndSendPos()
+{
+	static uint8_t sensorIndex = 0;
+	vec3_t result;
+	scalar_t distance;
+
+VPORTF.OUT |= 2;
+	calc_position(g_lighthouses,
+	              g_sensors[sensorIndex].angleRadians[0],
+	              g_sensors[sensorIndex].angleRadians[1],
+	              g_sensors[sensorIndex].angleRadians[2],
+	              g_sensors[sensorIndex].angleRadians[3],
+	              result,
+	              &distance);
+
+	// 32 bytes per send
+	printf("P:%u,%.1f,%.1f,%.1f,%.2f\r\n", 
+	       sensorIndex,
+	       (float)result[0], 
+	       (float)result[1], 
+	       (float)result[2], 
+	       (float)distance);
+
+	sensorIndex = (sensorIndex + 1) % 4;
+VPORTF.OUT &= ~2;
+
+	return 1;
+}
+
+// sends average of 29/4 = 7.25 bytes per sweep
+uint8_t processWindowSendAngles()
+{	
+	static uint8_t count = 0;
+	static uint16_t lastReportTime = 0;
+	uint16_t now = g_time;
+	uint8_t sensorIndex;
+
+	// Only send updated angles once every 4 sweeps
+	if(++count % 4 != 0)
+		return 0;
+
+	//if(now - lastReportTime > REPORT_INTERVAL*4)
+	//{
+		for(sensorIndex = 0; sensorIndex < NUM_SENSORS; ++sensorIndex)
+		{
+			// 29 bytes per send
+			printf("A:%u,%u,%u,%u,%u\r\n", 
+			       sensorIndex, 
+			       g_sensors[sensorIndex].angleTicks[0], 
+			       g_sensors[sensorIndex].angleTicks[1],
+			       g_sensors[sensorIndex].angleTicks[2],
+			       g_sensors[sensorIndex].angleTicks[3]);
+		}
+		lastReportTime = now;
+
+		return 1;
+	//}
+
+	return 0;
+}
+
+uint8_t processWindowSaveOotx()
+{
+	uint8_t sensorIndex;
+	uint8_t lighthouseIndex;
+	uint8_t doneWork = 0;
+
+	for(sensorIndex = 0; sensorIndex < NUM_SENSORS; ++sensorIndex)
+	{
+		for(lighthouseIndex = 0; lighthouseIndex < NUM_LIGHTHOUSES; ++lighthouseIndex)
+		{
+			ootx_t* ootx = &g_sensors[sensorIndex].ootx[lighthouseIndex];
+
+			if(ootx->validLength)
+			{
+				g_lighthouseOotx[lighthouseIndex].length = ootx->validLength;
+				memcpy(g_lighthouseOotx[lighthouseIndex].data, 
+				       ootx->data, 
+				       ootx->validLength);
+				g_lighthouseOotx[lighthouseIndex].isNew = 1;
+				ootx->validLength = 0;
+				//printf("OOTX: %u/%u\r\n", sensorIndex, lighthouseIndex);
+				doneWork = 1;
+			}
+		}
+	}
+
+	return doneWork;
+}
+
+uint8_t processWindowSendOotx()
+{
+	uint8_t lighthouseIndex;
+
+	for(lighthouseIndex = 0; lighthouseIndex < NUM_LIGHTHOUSES; ++lighthouseIndex)
+	{
+		if(g_lighthouseOotx[lighthouseIndex].isNew)
+		{
+			uint8_t pos;
+
+			// ~72 bytes per send
+			printf("D:%u,%u,", 
+			       lighthouseIndex, 
+			       g_lighthouseOotx[lighthouseIndex].length);
+			for(pos = 0; pos < g_lighthouseOotx[lighthouseIndex].length; ++pos)
+				printf("%02x", g_lighthouseOotx[lighthouseIndex].data[pos]);
+			printf("\r\n");
+			g_lighthouseOotx[lighthouseIndex].isNew = 0;
+			return 1;
+		}
+	}
+
+	return 0;
 }
 
 int main()
 {
-	uint16_t lastReportTime = 0;
-
 	memset(g_sensors, 0, sizeof(g_sensors));
 
 	CCP = 0xd8;             // enable protected register access
@@ -409,7 +526,9 @@ int main()
 	PORTA.PIN7CTRL = 3; // interrupt on falling edge
 
 	PORTF.OUT=0;
-	PORTF.DIR=64|32;
+	PORTF.DIR=64|32|16|8 |4|2|1;
+	PORTE.OUT=0;
+	PORTE.DIR=8;
 
 	PORTA.OUT = 1;      // Make USART0 pins outputs
         PORTA.DIR = 0xF;
@@ -419,28 +538,38 @@ int main()
 
 	for(;;)
 	{
-		uint16_t now;
-		int sensorIndex;
+		uint8_t inProcessingWindow;
+		uint8_t sensorIndex;
 
+VPORTF.OUT |= 8;
+		inProcessingWindow = 0;
 		for(sensorIndex = 0; sensorIndex < NUM_SENSORS; ++sensorIndex)
 		{
-			pollSensor(sensorIndex);
+			if(pollSensor(sensorIndex))
+				inProcessingWindow = 1;
 		}
 
-		now = g_time;
-		if(now - lastReportTime > REPORT_INTERVAL*4)
+		if(inProcessingWindow)
 		{
-			for(sensorIndex = 0; sensorIndex < NUM_SENSORS; ++sensorIndex)
-			{
-				printf("(%u, %u, %u, %u, %u)\r\n", 
-				       sensorIndex, 
-				       g_sensors[sensorIndex].angles[0], 
-				       g_sensors[sensorIndex].angles[1],
-				       g_sensors[sensorIndex].angles[2],
-				       g_sensors[sensorIndex].angles[3]);
-			}
-			lastReportTime = now;
+			// per sweep we transmit:
+			//    item     |  average           | worst case
+			//    ---------+--------------------+-----------
+			//    position | 32 bytes           | 32 bytes
+			//    angles   | 29/4 = 7.25 bytes  | 29 bytes
+			//    ootx     | 72/322 = 0.2 bytes | 72 bytes
+			//    TOTAL    | 39.45 bytes        | 32+72 = 104 bytes
+			//
+			// average bytes/s: 39.45*240 = 9,468 bytes/s ~= 83Kbit/s
+			// worst bytes/s: 104*240 = 24960 bytes/s ~= 220Kbit/s
+
+			processWindowCalcAndSendPos();
+
+			(void)(processWindowSendAngles() ||
+			       processWindowSaveOotx() ||
+			       processWindowSendOotx());
 		}
+
+VPORTF.OUT &= ~8;
 	}
 
 	return 0;
