@@ -2,6 +2,7 @@
 
 import os
 import sys
+import time
 import math
 import argparse
 import serial
@@ -279,16 +280,65 @@ def decodeOotx(data):
 
 
 def dumpAngle(line):
+	if not hasattr(dumpAngle, 'cnt'):
+		dumpAngle.cnt = 0
+		dumpAngle.min = [1000000, 1000000, 1000000, 1000000]
+		dumpAngle.max = [-1000000, -1000000, -1000000, -1000000]
+		dumpAngle.avg = [0, 0, 0, 0]
+	if line == None:
+		if hasattr(dumpAngle, 'cnt'):
+			print "\ntotal: ", dumpAngle.cnt
+			labels = ['0X', '0Y', '1X', '1Y']
+			for i in range(4):
+				print labels[i] + ':'
+				print "\trange: ", abs(dumpAngle.max[i] - dumpAngle.min[i])
+				print "\tmin: ", dumpAngle.min[i]
+				print "\tmax: ", dumpAngle.max[i]
+				print "\tavg: ", dumpAngle.avg[i]/dumpAngle.cnt
+		return
+
 	data = line.split(',', 4)
 	if len(data) == 5:
+		for i in range(4):
+			val = float(data[i+1])
+			if val < dumpAngle.min[i]: dumpAngle.min[i] = val
+			if val > dumpAngle.max[i]: dumpAngle.max[i] = val
+			dumpAngle.avg[i] += val
+		dumpAngle.cnt += 1
 		print "%s:    %5s:%5s    %5s:%5s" % tuple(data)
 
 def dumpPosition(line):
+	if not hasattr(dumpPosition, 'cnt'):
+		dumpPosition.cnt = 0
+		dumpPosition.min = [1000000, 1000000, 1000000]
+		dumpPosition.max = [-1000000, -1000000, -1000000]
+		dumpPosition.avg = [0, 0, 0]
+	if line == None:
+		if hasattr(dumpPosition, 'cnt'):
+			print "\ntotal: ", dumpPosition.cnt
+			labels = ['X', 'Y', 'Z']
+			for i in range(3):
+				print labels[i] + ':'
+				print "\trange: ", abs(dumpPosition.max[i] - dumpPosition.min[i])
+				print "\tmin: ", dumpPosition.min[i]
+				print "\tmax: ", dumpPosition.max[i]
+				print "\tavg: ", dumpPosition.avg[i]/dumpPosition.cnt
+		return
+
 	data = line.split(',', 4)
 	if len(data) == 5:
+		for i in range(3):
+			val = float(data[i+1])
+			if val < dumpPosition.min[i]: dumpPosition.min[i] = val
+			if val > dumpPosition.max[i]: dumpPosition.max[i] = val
+			dumpPosition.avg[i] += val
+		dumpPosition.cnt += 1
 		print "%s:    X: %8s    Y: %8s    Z: %8s    err: %s" % tuple(data)
 
 def dumpOotx(line):
+	if line == None:
+		return
+
 	data = line.split(',')
 	if len(data) == 3:
 		r = decodeOotx(data[2])
@@ -296,22 +346,52 @@ def dumpOotx(line):
 		for name, value in r.iteritems():
 			print "\t%s: %s" % (name, value)
 
-def dumpData(input, sensor, angles, ootx, position):
-	while True:
-		line = input.readline()
-		if not line: break
-		line = line.strip()
+def dumpLighthouse(line):
+	if line == None:
+		return
 
-		if sensor != None:
-			if int(line[2:-1].split(',')[0]) != sensor:
-				continue
+	data = line.split(',')
+	if len(data) == 13:
+		print "Lighthouse %s:" % data[0]
+		print "\tOrigin: %s %s %s" % (data[1], data[2], data[3])
+		print "\tRotation:"
+		print "\t\t%s %s %s" % (data[4], data[5], data[6])
+		print "\t\t%s %s %s" % (data[7], data[8], data[9])
+		print "\t\t%s %s %s" % (data[10], data[11], data[12])
 
-		if line.startswith('A:') and angles:
-			dumpAngle(line[2:-1])
-		elif line.startswith('P:') and position:
-			dumpPosition(line[2:-1])
-		elif line.startswith('D:') and ootx:
-			dumpOotx(line[2:-1])
+
+def dumpStatus(line):
+	if line == None:
+		return
+
+	print line
+
+
+def dumpData(input, sensor, angles, ootx, position, lighthouse, status):
+	try:
+		while True:
+			line = input.readline()
+			if not line: break
+			line = line.strip()
+
+			if sensor != None:
+				if int(line[2:].split(',')[0]) != sensor:
+					continue
+
+			if line.startswith('A:') and angles:
+				dumpAngle(line[2:])
+			elif line.startswith('P:') and position:
+				dumpPosition(line[2:])
+			elif line.startswith('D:') and ootx:
+				dumpOotx(line[2:])
+			elif line.startswith('L:') and lighthouse:
+				dumpLighthouse(line[2:])
+			elif line.startswith('S:') and status:
+				dumpStatus(line[2:])
+	except KeyboardInterrupt:
+		if angles: dumpAngle(None)
+		if position: dumpPosition(None)
+		if ootx: dumpOotx(None)
 
 
 def collectSamples(input, count, collectOOTX=True):
@@ -335,7 +415,6 @@ def collectSamples(input, count, collectOOTX=True):
 	n = 0
 	while n < count or (collectOOTX and (lighthouse1['ootx'] == None or lighthouse2['ootx'] == None)):
 		line = input.readline()
-		sys.stderr.write('.')
 
 		if line.startswith('D:'):
 			data = line[2:-1].split(',')
@@ -349,12 +428,14 @@ def collectSamples(input, count, collectOOTX=True):
 					lighthouse2['ootx'] = decodeOotx(data[2])
 			
 		if not line.startswith('A:') or n >= count:
+			sys.stderr.write('.')
 			continue
 		line = line[2:-1]
 
 		cols = line.split(',', 6)
 		i = int(cols[0])
 		if i < 0 or i > len(lighthouse1Angles):
+			sys.stderr.write('X')
 			continue
 
 		total += 1
@@ -364,6 +445,7 @@ def collectSamples(input, count, collectOOTX=True):
 		lighthouse2Angles[i][0] += int(cols[3])
 		lighthouse2Angles[i][1] += int(cols[4])
 
+		sys.stderr.write('*')
 		n += 1
 
 	sys.stdout.write('\n')
@@ -431,7 +513,7 @@ def printSolutionGnuplot(solutions):
 		v = lambda v: ' '.join([str(x) for x in v])
 
 		# draw lighthouse normal
-		print v(lp), v(lr.dot([0, 0, -100])), 0
+		print v(lp), v(lr.dot([0, 0, 100])), 0
 
 		# draw vectors from lighthouse to sensors
 		print v(lp), v(sp[0] - lp), 0
@@ -481,6 +563,12 @@ parser.add_argument('--dump-ootx', action='store_true',
 parser.add_argument('--dump-pos', action='store_true',
 	help='write position data to stdout, don\'t calc solution',
 	default=False)
+parser.add_argument('--dump-lighthouse', action='store_true',
+	help='write lighthouse position/rotation to stdout, don\'t calc solution',
+	default=False)
+parser.add_argument('--dump-status', action='store_true',
+	help='write status messages to stdout, don\'t calc solution',
+	default=False)
 parser.add_argument('--dump-sensor', type=int,
 	help='restrict dump output to a single sensor',
 	default=None)
@@ -493,13 +581,15 @@ elif os.path.isfile(args.input):
 	input = open(args.input)
 elif os.path.exists(args.input):
 	input = serial.Serial(args.input, args.bps)
+	time.sleep(0.1)
+	input.flushInput()
 	input.readline() # discard first, probably partial, line
 else:
 	print "can't open %s" % args.input
 	sys.exit(1)
 
-if args.dump_angles or args.dump_ootx or args.dump_pos:
-	dumpData(input, args.dump_sensor, args.dump_angles, args.dump_ootx, args.dump_pos)
+if args.dump_angles or args.dump_ootx or args.dump_pos or args.dump_lighthouse or args.dump_status:
+	dumpData(input, args.dump_sensor, args.dump_angles, args.dump_ootx, args.dump_pos, args.dump_lighthouse, args.dump_status)
 	sys.exit(1)
 
 lighthouse1, lighthouse2 = collectSamples(input, args.count, not args.no_gravity)
@@ -518,5 +608,5 @@ else:
 	print 'unknown output format'
 
 if args.verify:
-	verify(args.grid, lighthouse1, lighthouse2, solution1, solution2)
+	verify(args.grid, lighthouse1['angles'], lighthouse2['angles'], solution1, solution2)
 
