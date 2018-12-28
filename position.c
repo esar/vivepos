@@ -8,12 +8,12 @@
 #define LSTSQ_LIMIT         0.025
 
 
-scalar_t r01 = 60.0;
-scalar_t r02 = 84.8528137424;
-scalar_t r03 = 60.0;
-scalar_t r12 = 60.0;
-scalar_t r13 = 84.8528137424;
-scalar_t r23 = 60.0;
+scalar_t r01 = 30.0;
+scalar_t r02 = 42.426406871;
+scalar_t r03 = 30.0;
+scalar_t r12 = 30.0;
+scalar_t r13 = 42.426406871;
+scalar_t r23 = 30.0;
 
 
 void vec3Cross(vec3_t out, const vec3_t const a, const vec3_t const b)

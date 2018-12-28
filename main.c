@@ -51,10 +51,10 @@ ISR(TCA0_OVF_vect)
 			        "reti                 \n\t" \
 			        : : "i" (_SFR_IO_ADDR(TCB##x##_CCMP)), "i" (&g_sensors[x])); \
 	}
-TCB_ISR(0);
-TCB_ISR(1);
-TCB_ISR(2);
-TCB_ISR(3);
+TCB_ISR(0, 1);
+TCB_ISR(1, 0);
+TCB_ISR(2, 3);
+TCB_ISR(3, 2);
 
 
 ISR(PORTA_PORT_vect)
@@ -80,7 +80,7 @@ ISR(PORTA_PORT_vect)
 		if(TCB3.INTFLAGS & 1)
 			TCB3_INT_vect();
 
-		if(triggered & (1 << (4+0)))
+		if(triggered & (1 << (4+2)))
 		{
 			if(g_sensors[0].state == SENSOR_STATE_RISEN)
 			{
@@ -88,7 +88,7 @@ ISR(PORTA_PORT_vect)
 				g_sensors[0].state = SENSOR_STATE_FALLEN;
 			}
 		}
-		if(triggered & (1 << (4+1)))
+		if(triggered & (1 << (4+3)))
 		{
 			if(g_sensors[1].state == SENSOR_STATE_RISEN)
 			{
@@ -96,7 +96,7 @@ ISR(PORTA_PORT_vect)
 				g_sensors[1].state = SENSOR_STATE_FALLEN;
 			}
 		}
-		if(triggered & (1 << (4+2)))
+		if(triggered & (1 << (4+0)))
 		{
 			if(g_sensors[2].state == SENSOR_STATE_RISEN)
 			{
@@ -104,7 +104,7 @@ ISR(PORTA_PORT_vect)
 				g_sensors[2].state = SENSOR_STATE_FALLEN;
 			}
 		}
-		if(triggered & (1 << (4+3)))
+		if(triggered & (1 << (4+1)))
 		{
 			if(g_sensors[3].state == SENSOR_STATE_RISEN)
 			{
