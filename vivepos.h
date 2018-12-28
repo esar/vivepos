@@ -1,7 +1,5 @@
 #include <stdint.h>
 
-#include "position.h"
-
 
 #define F_TIMER              ((F_CPU) / 4)
 #define MICROSECONDS_IN_TICKS(x) ((uint16_t)((x) / 0.2))
@@ -41,6 +39,13 @@
 #define AXIS0                0
 #define AXIS1                1
 
+#ifndef TRUE
+#define TRUE 1
+#endif
+
+#ifndef FALSE
+#define FALSE 0
+#endif
 
 //typedef _Accum scalar_t;
 typedef float scalar_t;
@@ -54,12 +59,27 @@ typedef scalar_t mat4_4_t[16];
 typedef scalar_t mat4_6_t[24];
 typedef scalar_t mat6_4_t[24];
 
+
+typedef struct
+{
+	scalar_t err01, err02, err03, err12, err13, err23, total;
+
+} solution_error_t;
+
 typedef struct
 {
 	scalar_t rotationMatrix[9];
 	vec3_t origin;
+	solution_error_t error;
 
 } lighthouse_t;
+
+typedef struct
+{
+	lighthouse_t lighthouses[NUM_LIGHTHOUSES];
+	scalar_t totalError;
+
+} lighthouse_solution_t;
 
 typedef struct
 {
@@ -125,7 +145,8 @@ typedef struct
 
 } sensor_t;
 
-void solveLighthouse(lighthouse_t* lighthouses, sensor_t* sensors, ootx_msg_t* ootx);
+void solveLighthouse(lighthouse_solution_t* solution, sensor_t* sensors, ootx_msg_t* ootx);
+
 uint8_t calcPosition(lighthouse_t* lighthouses,
                      scalar_t angle1, scalar_t angle2, 
                      scalar_t angle3, scalar_t angle4,

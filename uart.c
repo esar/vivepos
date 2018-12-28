@@ -3,12 +3,12 @@
 #include <avr/interrupt.h>
 
 // TX_BUF_SIZE must be power of 2
-// increase size of counters if greater than 256
-#define TX_BUF_SIZE    256
+#define TX_BUF_SIZE    1024
 
+typedef uint16_t index_t;
 static uint8_t g_txBuf[TX_BUF_SIZE];
-static uint8_t g_txReadPos = 0;
-static uint8_t g_txWritePos = 0;
+static index_t g_txReadPos = 0;
+static index_t g_txWritePos = 0;
 
 ISR(USART0_DRE_vect)
 {
@@ -27,7 +27,7 @@ ISR(USART0_DRE_vect)
 
 int uartPutChar(char c, FILE* stream)
 {
-	uint8_t pos = (g_txWritePos + 1) & (TX_BUF_SIZE - 1);
+	index_t pos = (g_txWritePos + 1) & (TX_BUF_SIZE - 1);
 
 	// discard is tx buffer is full
 	if(pos == g_txReadPos)

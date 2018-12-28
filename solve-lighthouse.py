@@ -152,9 +152,7 @@ def solve(sensorGrid, sensorTicks):
 
 	# Calculate rotation from plane normal as seen by lighthouse
 	# to plane normal from the sensor's point of view
-	# TODO: Use orientation from OOTX data to get a real "up" vector
-	#       instead of assuming that the sensor is pointing up
-	rotationMatrixToFlat = calcRotationMatrix(averageNormal, np.double([0, 0, -1]))
+	rotationMatrixToFlat = calcRotationMatrix(averageNormal, np.double([0, 1, 0]))
 	
 	# Calculate center of plane as seen by lighthouse
 	center1 = sensorPoints[0] + ((sensorPoints[2] - sensorPoints[0]) / 2)
@@ -171,7 +169,7 @@ def solve(sensorGrid, sensorTicks):
 
 	# Calculate the rotation around the sensor normal vector
 	# to get X and Y in the correct orientation and rotate the points into place
-	rotationMatrix = calcRotationMatrix(sensorPoints[1] - sensorPoints[0], np.double([0, 1, 0]))
+	rotationMatrix = calcRotationMatrix(sensorPoints[1] - sensorPoints[0], np.double([1, 0, 0]))
 	lighthousePoint = rotationMatrix.dot(lighthousePoint)
 	sensorPoints[0] = rotationMatrix.dot(sensorPoints[0])
 	sensorPoints[1] = rotationMatrix.dot(sensorPoints[1])
@@ -360,6 +358,21 @@ def dumpLighthouse(line):
 		print "\t\t%s %s %s" % (data[10], data[11], data[12])
 
 
+def dumpLighthouseError(line):
+	if line == None:
+		return
+
+	data = line.split(',')
+	if len(data) == 6:
+		print "Solution Error:"
+		print "\tErr01: ", data[0]
+		print "\tErr02: ", data[1]
+		print "\tErr03: ", data[2]
+		print "\tErr12: ", data[3]
+		print "\tErr13: ", data[4]
+		print "\tErr23: ", data[5]
+
+
 def dumpStatus(line):
 	if line == None:
 		return
@@ -367,7 +380,7 @@ def dumpStatus(line):
 	print line
 
 
-def dumpData(input, sensor, angles, ootx, position, lighthouse, status):
+def dumpData(input, sensor, count, angles, ootx, position, lighthouse, status):
 	try:
 		while True:
 			line = input.readline()
@@ -375,23 +388,46 @@ def dumpData(input, sensor, angles, ootx, position, lighthouse, status):
 			line = line.strip()
 
 			if sensor != None:
-				if int(line[2:].split(',')[0]) != sensor:
-					continue
+				try:
+					if (not line.startswith('S:')) and (not line.startswith('E:')) and int(line[2:].split(',')[0]) != sensor:
+						continue
+				except ValueError:
+					# ignore
+					print "value error"
 
+			if count != None:
+				if count == 0:
+					break
+
+			matches = 0
 			if line.startswith('A:') and angles:
+				matches += 1
 				dumpAngle(line[2:])
 			elif line.startswith('P:') and position:
+				matches += 1
 				dumpPosition(line[2:])
 			elif line.startswith('D:') and ootx:
+				matches += 1
 				dumpOotx(line[2:])
 			elif line.startswith('L:') and lighthouse:
+				matches += 1
 				dumpLighthouse(line[2:])
+			elif line.startswith('E:') and lighthouse:
+				matches += 1
+				dumpLighthouseError(line[2:])
 			elif line.startswith('S:') and status:
+				matches += 1
 				dumpStatus(line[2:])
+
+			if count != None:
+				count -= matches
 	except KeyboardInterrupt:
-		if angles: dumpAngle(None)
-		if position: dumpPosition(None)
-		if ootx: dumpOotx(None)
+		# do nothing
+		angles = angles
+
+	if angles: dumpAngle(None)
+	if position: dumpPosition(None)
+	if ootx: dumpOotx(None)
 
 
 def collectSamples(input, count, collectOOTX=True):
@@ -572,6 +608,9 @@ parser.add_argument('--dump-status', action='store_true',
 parser.add_argument('--dump-sensor', type=int,
 	help='restrict dump output to a single sensor',
 	default=None)
+parser.add_argument('--dump-count', type=int,
+	help='restrict the number of items dumped',
+        default=None)
 args = parser.parse_args()
 
 input = None
@@ -589,7 +628,7 @@ else:
 	sys.exit(1)
 
 if args.dump_angles or args.dump_ootx or args.dump_pos or args.dump_lighthouse or args.dump_status:
-	dumpData(input, args.dump_sensor, args.dump_angles, args.dump_ootx, args.dump_pos, args.dump_lighthouse, args.dump_status)
+	dumpData(input, args.dump_sensor, args.dump_count, args.dump_angles, args.dump_ootx, args.dump_pos, args.dump_lighthouse, args.dump_status)
 	sys.exit(1)
 
 lighthouse1, lighthouse2 = collectSamples(input, args.count, not args.no_gravity)

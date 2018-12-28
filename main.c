@@ -9,12 +9,20 @@
 #include "uart.h"
 
 
+#define SOLVE_LIGHTHOUSE_INTERVAL    1200 /*7200*/ /* 60 seconds */
+#define SEND_LIGHTHOUSE_INTERVAL     1200  /*  5 seconds */
+
+#define NUM_SOLUTIONS                2
+
+#define SOLUTION_VALID()             (g_activeSolution < NUM_SOLUTIONS)
+
 // TODO: Use RTC
 
-static uint8_t      g_lighthousesValid = 0;
-static lighthouse_t g_lighthouses[NUM_LIGHTHOUSES];
+static lighthouse_solution_t g_solutions[NUM_SOLUTIONS];
+static uint8_t      g_activeSolution = -1;
 static ootx_msg_t   g_lighthouseOotx[NUM_LIGHTHOUSES];
 static sensor_t     g_sensors[NUM_SENSORS];
+static uint16_t     g_sweepCount = 0;
 static uint8_t      g_time = 0;
 
 
@@ -26,8 +34,8 @@ ISR(TCA0_OVF_vect)
 }
 
 // NOTE: TCBx.INTFLAGS is cleared by reading TCBx.CCMP
-#define TCB_ISR(x)    \
-	ISR(TCB##x##_INT_vect, ISR_NAKED) \
+#define TCB_ISR(tcb, sensor)    \
+	ISR(TCB##tcb##_INT_vect, ISR_NAKED) \
 	{ \
 		/* g_sensors[0].riseTime = TCB0.CCMP; */ \
 		/* g_sensors[0].state = SENSOR_STATE_RISEN; */ \
@@ -49,7 +57,7 @@ ISR(TCA0_OVF_vect)
 			        "pop  r24             \n\t" \
 			       /* "cbi  0x15, 5         \n\t" */ \
 			        "reti                 \n\t" \
-			        : : "i" (_SFR_IO_ADDR(TCB##x##_CCMP)), "i" (&g_sensors[x])); \
+			        : : "i" (_SFR_IO_ADDR(TCB##tcb##_CCMP)), "i" (&g_sensors[sensor])); \
 	}
 TCB_ISR(0, 1);
 TCB_ISR(1, 0);
@@ -212,8 +220,8 @@ uint8_t pollSensor(uint8_t sensorIndex)
 			sensor->fallTime = sensor->riseTime + 1;
 			sensor->state = SENSOR_STATE_FALLEN;
 //printf("TOT\r\n");
-VPORTF.OUT |= 16;
-VPORTF.OUT &= ~16;
+//VPORTF.OUT |= 16;
+//VPORTF.OUT &= ~16;
 		}
 	}
 
@@ -297,82 +305,146 @@ VPORTF.OUT &= ~16;
 			// further pulse (the sweep) in this cycle. This means we can
 			// risk not being called for a while, because we won't miss
 			// a pulse if more than one occur before we're next called
-			return 1;
+
+			// Also let them know which sweep we're on so that they
+			// can synchronise processing angles when a whole set is
+			// complete
+			return sensor->currentAngle + 1;
 		}
 	}
 
 	return 0;
 }
 
+scalar_t calcTotalTriangulationError(lighthouse_solution_t* solution)
+{
+	uint8_t i;
+	vec3_t result;
+	scalar_t distance;
+	scalar_t total = 0;
+
+	for(i = 0; i < NUM_SENSORS; ++i)
+	{
+		calcPosition(solution->lighthouses,
+		             g_sensors[i].angleRadians[MASTER][AXIS0],
+		             g_sensors[i].angleRadians[MASTER][AXIS1],
+		             g_sensors[i].angleRadians[SLAVE][AXIS0],
+		             g_sensors[i].angleRadians[SLAVE][AXIS1],
+		             result,
+		             &distance);
+		total += fabs(distance);
+	}
+
+	return total;
+}
+
 uint8_t processWindowSolveLighthouse()
 {
-	if(g_lighthousesValid == 0 &&
-	   g_lighthouseOotx[0].length > 0 && 
-	   g_lighthouseOotx[1].length > 0)
+	static uint16_t last = 0;
+
+	if(!SOLUTION_VALID() && g_sweepCount - last > SOLVE_LIGHTHOUSE_INTERVAL)
 	{
-		printf("S:Solving\r\n");
-VPORTF.OUT |= 2;
-		// Takes ~100mS to solve
-		solveLighthouse(g_lighthouses, g_sensors, g_lighthouseOotx);
-VPORTF.OUT &= ~2;
+		// Go ahead if we have everything that we need
+		if(g_lighthouseOotx[0].length > 0 && 
+		   g_lighthouseOotx[1].length > 0)
+		{
+			uint8_t index = (g_activeSolution + 1) % NUM_SOLUTIONS;
 
-		printf("S:Running\r\n");
-		g_lighthousesValid = 1;
+			printf("S:Solving\r\n");
+//VPORTF.OUT |= 2;
+			// Takes ~100mS to solve
+			solveLighthouse(&g_solutions[index], g_sensors, g_lighthouseOotx);
+//VPORTF.OUT &= ~2;
 
+			if(g_solutions[index].totalError < (scalar_t)1.0)
+				g_solutions[index].totalError = calcTotalTriangulationError(&g_solutions[index]);
+
+			if(g_solutions[index].totalError < (scalar_t)1.0)
+			{
+				printf("S:Running\r\n");
+				g_activeSolution = index;
+			}
+
+			last = g_sweepCount;
+			return 1;
+		}
+
+	}
+
+	return 0;
+}
+
+void sendLighthouse(uint8_t index)
+{
+	printf("L:%u,%.1f,%.1f,%.1f,%f,%f,%f,%f,%f,%f,%f,%f,%f\r\n", index,
+	       (float)g_solutions[g_activeSolution].lighthouses[index].origin[0],
+	       (float)g_solutions[g_activeSolution].lighthouses[index].origin[1],
+	       (float)g_solutions[g_activeSolution].lighthouses[index].origin[2],
+	       (float)g_solutions[g_activeSolution].lighthouses[index].rotationMatrix[0],
+	       (float)g_solutions[g_activeSolution].lighthouses[index].rotationMatrix[1],
+	       (float)g_solutions[g_activeSolution].lighthouses[index].rotationMatrix[2],
+	       (float)g_solutions[g_activeSolution].lighthouses[index].rotationMatrix[3],
+	       (float)g_solutions[g_activeSolution].lighthouses[index].rotationMatrix[4],
+	       (float)g_solutions[g_activeSolution].lighthouses[index].rotationMatrix[5],
+	       (float)g_solutions[g_activeSolution].lighthouses[index].rotationMatrix[6],
+	       (float)g_solutions[g_activeSolution].lighthouses[index].rotationMatrix[7],
+	       (float)g_solutions[g_activeSolution].lighthouses[index].rotationMatrix[8]);
+}
+
+uint8_t processWindowSendLighthouse0()
+{
+	static uint16_t last = 0;
+
+	if(SOLUTION_VALID() && g_sweepCount - last > SEND_LIGHTHOUSE_INTERVAL)
+	{
+		// for each lighthouse, approx:
+		//     17 fixed chars
+		//     7*3 = 21 position chars
+		//     9*9 = 81 rotation chars
+		// ~119 total bytes per send
+		sendLighthouse(0);
+		last = g_sweepCount;
 		return 1;
 	}
 
 	return 0;
 }
 
-uint8_t processWindowSendLighthouse()
+uint8_t processWindowSendLighthouse1()
 {
-	static uint8_t count = 0;
+	static uint16_t last = 0;
 
-	++count;
-	if(g_lighthousesValid)
+	if(SOLUTION_VALID() && g_sweepCount - last > SEND_LIGHTHOUSE_INTERVAL)
 	{
-		// Stagger sending of the data for the two lighthouses
-		// to avoid overflowing the transmit buffer
-		switch(count)
-		{
-			case 0:
-				// approx:
-				//     17 fixed chars
-				//     7*3 = 21 position chars
-				//     9*9 = 81 rotation chars
-				//
-				//     119 total bytes per send
-				printf("L:0,%.1f,%.1f,%.1f,%f,%f,%f,%f,%f,%f,%f,%f,%f\r\n",
-				       (float)g_lighthouses[0].origin[0],
-				       (float)g_lighthouses[0].origin[1],
-				       (float)g_lighthouses[0].origin[2],
-				       (float)g_lighthouses[0].rotationMatrix[0],
-				       (float)g_lighthouses[0].rotationMatrix[1],
-				       (float)g_lighthouses[0].rotationMatrix[2],
-				       (float)g_lighthouses[0].rotationMatrix[3],
-				       (float)g_lighthouses[0].rotationMatrix[4],
-				       (float)g_lighthouses[0].rotationMatrix[5],
-				       (float)g_lighthouses[0].rotationMatrix[6],
-				       (float)g_lighthouses[0].rotationMatrix[7],
-				       (float)g_lighthouses[0].rotationMatrix[8]);
-				return 1;
-			case 64:
-				printf("L:1,%.1f,%.1f,%.1f,%f,%f,%f,%f,%f,%f,%f,%f,%f\r\n",
-				       (float)g_lighthouses[1].origin[0],
-				       (float)g_lighthouses[1].origin[1],
-				       (float)g_lighthouses[1].origin[2],
-				       (float)g_lighthouses[1].rotationMatrix[0],
-				       (float)g_lighthouses[1].rotationMatrix[1],
-				       (float)g_lighthouses[1].rotationMatrix[2],
-				       (float)g_lighthouses[1].rotationMatrix[3],
-				       (float)g_lighthouses[1].rotationMatrix[4],
-				       (float)g_lighthouses[1].rotationMatrix[5],
-				       (float)g_lighthouses[1].rotationMatrix[6],
-				       (float)g_lighthouses[1].rotationMatrix[7],
-				       (float)g_lighthouses[1].rotationMatrix[8]);
-				return 1;
-		}
+		// for each lighthouse, approx:
+		//     17 fixed chars
+		//     7*3 = 21 position chars
+		//     9*9 = 81 rotation chars
+		// ~119 total bytes per send
+		sendLighthouse(1);
+		last = g_sweepCount;
+		return 1;
+	}
+
+	return 0;
+}
+
+uint8_t processWindowSendLighthouseError()
+{
+	static uint16_t last = 0;
+
+	if(SOLUTION_VALID() && g_sweepCount - last > SEND_LIGHTHOUSE_INTERVAL)
+	{
+		// ~33 total bytes per send
+		printf("E:%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\r\n",
+		       (float)g_solutions[g_activeSolution].lighthouses[SLAVE].error.err01,
+		       (float)g_solutions[g_activeSolution].lighthouses[SLAVE].error.err02,
+		       (float)g_solutions[g_activeSolution].lighthouses[SLAVE].error.err03,
+		       (float)g_solutions[g_activeSolution].lighthouses[SLAVE].error.err12,
+		       (float)g_solutions[g_activeSolution].lighthouses[SLAVE].error.err13,
+		       (float)g_solutions[g_activeSolution].lighthouses[SLAVE].error.err23);
+		last = g_sweepCount;
+		return 1;
 	}
 
 	return 0;
@@ -384,10 +456,10 @@ uint8_t processWindowCalcAndSendPos()
 	vec3_t result;
 	scalar_t distance;
 
-	if(g_lighthousesValid)
+	if(SOLUTION_VALID())
 	{
 //VPORTF.OUT |= 2;
-		calcPosition(g_lighthouses,
+		calcPosition(g_solutions[g_activeSolution].lighthouses,
 		             g_sensors[sensorIndex].angleRadians[MASTER][AXIS0],
 		             g_sensors[sensorIndex].angleRadians[MASTER][AXIS1],
 		             g_sensors[sensorIndex].angleRadians[SLAVE][AXIS0],
@@ -415,12 +487,7 @@ uint8_t processWindowCalcAndSendPos()
 // sends average of 29/4 = 7.25 bytes per sweep
 uint8_t processWindowSendAngles()
 {	
-	static uint8_t count = 0;
 	uint8_t sensorIndex;
-
-	// Only send updated angles once every 4 sweeps
-	if(++count % 4 != 0)
-		return 0;
 
 	for(sensorIndex = 0; sensorIndex < NUM_SENSORS; ++sensorIndex)
 	{
@@ -458,7 +525,7 @@ uint8_t processWindowSaveOotx()
 				ootx->validLength = 0;
 				doneWork = 1;
 
-				if(!g_lighthousesValid)
+				if(!SOLUTION_VALID())
 					printf("S:Got OOTX %u\r\n", lighthouseIndex);
 			}
 		}
@@ -543,8 +610,8 @@ int main()
 
 	PORTF.OUT=0;
 	PORTF.DIR=64|32|16|8 |4|2|1;
-	PORTE.OUT=0;
-	PORTE.DIR=8;
+	//PORTE.OUT=0;
+	//PORTE.DIR=8;
 
 	PORTA.OUT = 1;      // Make USART0 pins outputs
         PORTA.DIR = 0xF;
@@ -558,12 +625,13 @@ int main()
 		uint8_t inProcessingWindow;
 		uint8_t sensorIndex;
 
-VPORTF.OUT |= 8;
+//VPORTF.OUT |= 8;
 		inProcessingWindow = 0;
 		for(sensorIndex = 0; sensorIndex < NUM_SENSORS; ++sensorIndex)
 		{
-			if(pollSensor(sensorIndex))
-				inProcessingWindow = 1;
+			uint8_t result = pollSensor(sensorIndex);
+			if(result)
+				inProcessingWindow = result;
 		}
 
 		if(inProcessingWindow)
@@ -580,17 +648,34 @@ VPORTF.OUT |= 8;
 			// average bytes/s: 39.54*240 = 9,490 bytes/s ~= 83Kbit/s
 			// worst bytes/s: 151*240 = 36240 bytes/s ~= 318Kbit/s
 
-			  
+			 
+			// New positions need to be calculated every sweep to
+			// be able to produce 30 positions per second for each
+			// of the 4 sensors 
 			processWindowCalcAndSendPos();
 
-			(void)(processWindowSolveLighthouse() ||
-			       processWindowSendLighthouse() ||
-			       processWindowSendAngles() ||
-			       processWindowSaveOotx() ||
-			       processWindowSendOotx());
+			if(inProcessingWindow == 1)
+			{
+				// In first sweep, we should have a whole set of angles
+				// ready to be processed
+				processWindowSendAngles();
+			}
+			else
+			{
+				// Use co-operative multitasking for the other
+				// lower priority tasks
+				(void)(processWindowSolveLighthouse() ||
+				       processWindowSendLighthouse0() ||
+				       processWindowSendLighthouse1() ||
+				       processWindowSendLighthouseError() ||
+				       processWindowSaveOotx() ||
+				       processWindowSendOotx());
+			}
+
+			++g_sweepCount;
 		}
 
-VPORTF.OUT &= ~8;
+//VPORTF.OUT &= ~8;
 	}
 
 	return 0;

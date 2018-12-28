@@ -4,7 +4,7 @@
 
 #include "vivepos.h"
 
-#define LSTSQ_ITERATIONS    10
+#define LSTSQ_ITERATIONS    20
 #define LSTSQ_LIMIT         0.025
 
 
@@ -240,7 +240,7 @@ void calcPlaneCenter(vec3_t out, vec3_t points[4])
 	vec3Div(out, out, 2);
 }
 
-void calcSolutionError(vec3_t points[4])
+void calcSolutionError(solution_error_t* errors, vec3_t points[4])
 {
 	vec3_t e01, e02, e03, e12, e13, e23;
 
@@ -251,12 +251,46 @@ void calcSolutionError(vec3_t points[4])
 	vec3Sub(e13, points[1], points[3]);
 	vec3Sub(e23, points[2], points[3]);
 
-	//printf("err01: %f\r\n", vec3Len(e01) - r01);
-	//printf("err02: %f\r\n", vec3Len(e02) - r02);
-	//printf("err03: %f\r\n", vec3Len(e03) - r03);
-	//printf("err12: %f\r\n", vec3Len(e12) - r12);
-	//printf("err13: %f\r\n", vec3Len(e13) - r13);
-	//printf("err23: %f\r\n", vec3Len(e23) - r23);
+	errors->err01 = vec3Len(e01) - r01;
+	errors->err02 = vec3Len(e02) - r02;
+	errors->err03 = vec3Len(e03) - r03;
+	errors->err12 = vec3Len(e12) - r12;
+	errors->err13 = vec3Len(e13) - r13;
+	errors->err23 = vec3Len(e23) - r23;
+
+	errors->total = errors->err01 * errors->err01 +
+	                errors->err02 * errors->err02 +
+	                errors->err03 * errors->err03 +
+	                errors->err12 * errors->err12 +
+	                errors->err13 * errors->err13 +
+	                errors->err23 * errors->err23;
+
+/*
+	errors->total = fabs(errors->err01) +
+	                fabs(errors->err02) +
+	                fabs(errors->err03) +
+	                fabs(errors->err12) +
+	                fabs(errors->err13) +
+	                fabs(errors->err23);
+*/
+}
+
+void resetSolutionError(solution_error_t* error)
+{
+	error->err01 = 
+	error->err02 =
+	error->err03 = 
+	error->err12 = 
+	error->err13 =
+	error->err23 = 
+	error->total = 9999;
+}
+
+void invalidateSolution(lighthouse_solution_t* solution)
+{
+	resetSolutionError(&solution->lighthouses[MASTER].error);
+	resetSolutionError(&solution->lighthouses[SLAVE].error);
+	solution->totalError = 9999;
 }
 
 scalar_t residual(scalar_t a, scalar_t b, scalar_t c, scalar_t d)
@@ -374,10 +408,10 @@ void calcSensorPositions(vec3_t points[4], sensor_t* sensors, uint8_t lighthouse
 	vec3Mul(points[3], points[3], distance[3]);
 }
 
-void convertToMasterCoordinates(vec3_t slavePosition, 
-                                mat3_3_t slaveRotation, 
-                                vec3_t slavePoints[4],
-                                vec3_t masterPoints[4])
+uint8_t convertToMasterCoordinates(vec3_t slavePosition, 
+                                   mat3_3_t slaveRotation, 
+                                   vec3_t slavePoints[4],
+                                   vec3_t masterPoints[4])
 {
 	uint8_t i;
 	mat3_3_t rotation, tmprot;
@@ -391,6 +425,13 @@ void convertToMasterCoordinates(vec3_t slavePosition,
 
 	// Calculate sensor plane normal from master's point of view
 	calcAverageSensorNormal(to, masterPoints);
+
+	// Check if both the master and slave sensor plane normal are pointing
+	// in the same approximate direction (less than 90 degrees apart). 
+	// If they're not then one of the solutions is probably coming up from 
+	// below the sensor plane, which is wrong, so bail out and reject the solution.
+	if(vec3Dot(from, to) <= 0)
+		return FALSE;
 
 	// Calculate rotation required to align slave normal to master
 	calcRotationMatrix(slaveRotation, from, to);
@@ -439,6 +480,8 @@ void convertToMasterCoordinates(vec3_t slavePosition,
 	// Rotate slaveRotation matrix
 	memcpy(tmprot, slaveRotation, 3*3*sizeof(scalar_t));
 	matDot(slaveRotation, rotation, 3, 3, tmprot, 3, 3);
+
+	return TRUE;
 }
 
 void rotateForGravity(vec3_t masterPosition, mat3_3_t masterRotation, vec3_t masterZ,
@@ -475,8 +518,11 @@ void rotateForGravity(vec3_t masterPosition, mat3_3_t masterRotation, vec3_t mas
 	matDot(slaveRotation, rotation, 3, 3, tmprot, 3, 3);
 }
 
-void solveLighthouse(lighthouse_t* lighthouses, sensor_t* sensors, ootx_msg_t* ootx)
+void solveLighthouse(lighthouse_solution_t* solution, 
+                     sensor_t* sensors, ootx_msg_t* ootx)
 {
+	uint8_t i;
+	scalar_t distance;
 	vec3_t masterPoints[4];
 	vec3_t slavePoints[4];
 	vec3_t masterZ =
@@ -492,43 +538,65 @@ void solveLighthouse(lighthouse_t* lighthouses, sensor_t* sensors, ootx_msg_t* o
 		ootx[SLAVE].msg.accel_dir_z
 	};
 
-
 	// Set master rotation matrix to identity
-	lighthouses[0].rotationMatrix[0] = 1;
-	lighthouses[0].rotationMatrix[1] = 0;
-	lighthouses[0].rotationMatrix[2] = 0;
+	solution->lighthouses[0].rotationMatrix[0] = 1;
+	solution->lighthouses[0].rotationMatrix[1] = 0;
+	solution->lighthouses[0].rotationMatrix[2] = 0;
 
-	lighthouses[0].rotationMatrix[3] = 0;
-	lighthouses[0].rotationMatrix[4] = 1;
-	lighthouses[0].rotationMatrix[5] = 0;
+	solution->lighthouses[0].rotationMatrix[3] = 0;
+	solution->lighthouses[0].rotationMatrix[4] = 1;
+	solution->lighthouses[0].rotationMatrix[5] = 0;
 
-	lighthouses[0].rotationMatrix[6] = 0;
-	lighthouses[0].rotationMatrix[7] = 0;
-	lighthouses[0].rotationMatrix[8] = 1;
+	solution->lighthouses[0].rotationMatrix[6] = 0;
+	solution->lighthouses[0].rotationMatrix[7] = 0;
+	solution->lighthouses[0].rotationMatrix[8] = 1;
 
 	// Set master origin to world origin
-	lighthouses[0].origin[0] = 0;
-	lighthouses[0].origin[1] = 0;
-	lighthouses[0].origin[2] = 0;
+	solution->lighthouses[0].origin[0] = 0;
+	solution->lighthouses[0].origin[1] = 0;
+	solution->lighthouses[0].origin[2] = 0;
 	
 	// Calculate the positions of the sensors as seen by the master lighthouse
 	calcSensorPositions(masterPoints, sensors, MASTER);
-	calcSolutionError(masterPoints);
+	// TODO: don't bother calculating error here, just check if
+	//       any values are NaN and bail early if they are
+	calcSolutionError(&solution->lighthouses[MASTER].error, masterPoints);
 
 	// Calculate the positions of the sensors as seen by the slave lighthouse
 	calcSensorPositions(slavePoints, sensors, SLAVE);
-	calcSolutionError(slavePoints);
+	//calcSolutionError(slavePoints);
 
 	// Convert the slave positions/rotations to the master's coordinate space
-	convertToMasterCoordinates(lighthouses[1].origin, lighthouses[1].rotationMatrix, 
-	                           slavePoints, masterPoints);
+	if(!convertToMasterCoordinates(solution->lighthouses[1].origin, solution->lighthouses[1].rotationMatrix, 
+	                               slavePoints, masterPoints))
+	{
+		invalidateSolution(solution);
+		return;
+	}
 
 	// Rotate everything for the gravity direction from the lighthouse accelerometer data
-	rotateForGravity(lighthouses[0].origin, lighthouses[0].rotationMatrix, masterZ, 
-	                 lighthouses[1].origin, lighthouses[1].rotationMatrix, slaveZ);
+	rotateForGravity(solution->lighthouses[0].origin, solution->lighthouses[0].rotationMatrix, masterZ, 
+	                 solution->lighthouses[1].origin, solution->lighthouses[1].rotationMatrix, slaveZ);
+
+	// TODO: use solution to calculate sensor positions, measure distance between sensors
+	// and use this result as the final error estimate
+	for(i = 0; i < NUM_SENSORS; ++i)
+	{
+		calcPosition(solution->lighthouses,
+		             sensors[i].angleRadians[MASTER][AXIS0],
+		             sensors[i].angleRadians[MASTER][AXIS1],
+		             sensors[i].angleRadians[SLAVE][AXIS0],
+		             sensors[i].angleRadians[SLAVE][AXIS1],
+		             slavePoints[i],
+		             &distance);
+	}
+	calcSolutionError(&solution->lighthouses[SLAVE].error, slavePoints);
+
 }
 
-uint8_t intersectLines(vec3_t origin1, vec3_t ray1, vec3_t origin2, vec3_t ray2, vec3_t result, scalar_t* distance)
+uint8_t intersectLines(vec3_t origin1, vec3_t ray1,
+                       vec3_t origin2, vec3_t ray2,
+                       vec3_t result, scalar_t* distance)
 {
 	scalar_t a, b, c, d, e;
 	scalar_t denom;
@@ -614,45 +682,84 @@ uint8_t calcPosition(lighthouse_t* lighthouses,
 	return intersectLines(lighthouses[0].origin, ray1, lighthouses[1].origin, ray2, result, distance);
 }
 
+
 /*
+scalar_t ticksToAngle(uint16_t ticks)
+{
+	return ((scalar_t)ticks - SWEEP_CENTER_IN_TICKS) * (M_PI / SWEEP_180_IN_TICKS);
+}
+
 void main()
 {
-	lighthouse_t lh[2];
+	lighthouse_solution_t solution;
+	sensor_t sensors[4];
+	ootx_msg_t ootx[2];
 
-	lh[0].ticks[0] = 19328;
-	lh[0].ticks[1] = 10716;
-	lh[0].ticks[2] = 18168;
-	lh[0].ticks[3] = 10909;
-	lh[0].ticks[4] = 17534;
-	lh[0].ticks[5] = 10270;
-	lh[0].ticks[6] = 18747;
-	lh[0].ticks[7] = 10065;
-	lh[0].z[0] = 5;
-	lh[0].z[1] = 127;
-	lh[0].z[2] = 2;
-	
-	lh[1].ticks[0] = 18031;
-	lh[1].ticks[1] = 20023;
-	lh[1].ticks[2] = 18017;
-	lh[1].ticks[3] = 19459;
-	lh[1].ticks[4] = 18405;
-	lh[1].ticks[5] = 19339;
-	lh[1].ticks[6] = 18416;
-	lh[1].ticks[7] = 19884;
-	lh[1].z[0] = -127;
-	lh[1].z[1] = 32;
-	lh[1].z[2] = 76;
+	uint16_t samples[] = {
+20509,12085,17680,19976,20231,12324,17547,19764,20683,12439,17349,19995,20963,12208,17482,20204,
+20506,12085,17679,19976,20228,12324,17547,19764,20680,12438,17349,19995,20960,12208,17482,20204,
+20506,12085,17680,19977,20228,12326,17548,19765,20680,12439,17350,19996,20960,12209,17483,20205,
+20503,12083,17678,19976,20225,12323,17546,19764,20677,12437,17348,19995,20957,12207,17481,20204,
+20502,12085,17680,19975,20224,12325,17547,19764,20676,12438,17350,19995,20956,12208,17483,20204,
+20502,12083,17676,19974,20224,12323,17543,19763,20677,12436,17345,19994,20957,12205,17479,20203,
+20502,12084,17677,19972,20224,12324,17544,19761,20676,12438,17346,19992,20956,12207,17480,20200,
+};
+	uint8_t i;
 
-	solveLighthouse(lh);
+	for(i = 0; i < sizeof(samples) / sizeof(uint16_t); i += 16)
+	{
+	sensors[0].angleRadians[0][0] = ticksToAngle(samples[i+0]);
+	sensors[0].angleRadians[0][1] = ticksToAngle(samples[i+1]);
+	sensors[0].angleRadians[1][0] = ticksToAngle(samples[i+2]);
+	sensors[0].angleRadians[1][1] = ticksToAngle(samples[i+3]);
+	sensors[1].angleRadians[0][0] = ticksToAngle(samples[i+4]);
+	sensors[1].angleRadians[0][1] = ticksToAngle(samples[i+5]);
+	sensors[1].angleRadians[1][0] = ticksToAngle(samples[i+6]);
+	sensors[1].angleRadians[1][1] = ticksToAngle(samples[i+7]);
+	sensors[2].angleRadians[0][0] = ticksToAngle(samples[i+8]);
+	sensors[2].angleRadians[0][1] = ticksToAngle(samples[i+9]);
+	sensors[2].angleRadians[1][0] = ticksToAngle(samples[i+10]);
+	sensors[2].angleRadians[1][1] = ticksToAngle(samples[i+11]);
+	sensors[3].angleRadians[0][0] = ticksToAngle(samples[i+12]);
+	sensors[3].angleRadians[0][1] = ticksToAngle(samples[i+13]);
+	sensors[3].angleRadians[1][0] = ticksToAngle(samples[i+14]);
+	sensors[3].angleRadians[1][1] = ticksToAngle(samples[i+15]);
 
-	printf("o: %f, %f, %f\n", lh[0].origin[0], lh[0].origin[1], lh[0].origin[2]);
-	printf("r:\n");
-	printf("\t%f, %f, %f\n", lh[0].rotationMatrix[0], lh[0].rotationMatrix[1], lh[0].rotationMatrix[2]);
-	printf("\t%f, %f, %f\n", lh[0].rotationMatrix[3], lh[0].rotationMatrix[4], lh[0].rotationMatrix[5]);
-	printf("\t%f, %f, %f\n", lh[0].rotationMatrix[6], lh[0].rotationMatrix[7], lh[0].rotationMatrix[8]);
-	printf("so = np.array([%f, %f, %f])\n", lh[1].origin[0], lh[1].origin[1], lh[1].origin[2]);
-	printf("sr = np.array([[%f, %f, %f],\n", lh[1].rotationMatrix[0], lh[1].rotationMatrix[1], lh[1].rotationMatrix[2]);
-	printf("\t[%f, %f, %f]\n", lh[1].rotationMatrix[3], lh[1].rotationMatrix[4], lh[1].rotationMatrix[5]);
-	printf("\t[%f, %f, %f]])\n", lh[1].rotationMatrix[6], lh[1].rotationMatrix[7], lh[1].rotationMatrix[8]);
+	ootx[MASTER].msg.accel_dir_x = 5;
+	ootx[MASTER].msg.accel_dir_y = 127;
+	ootx[MASTER].msg.accel_dir_z = 2;
+	ootx[SLAVE].msg.accel_dir_x = -127;
+	ootx[SLAVE].msg.accel_dir_y = 34;
+	ootx[SLAVE].msg.accel_dir_z = 78;
+
+	solveLighthouse(&solution, sensors, ootx);
+
+	printf("mo: %f, %f, %f\n", solution.lighthouses[0].origin[0], solution.lighthouses[0].origin[1], solution.lighthouses[0].origin[2]);
+	printf("mr:\n");
+	printf("\t%f, %f, %f\n", solution.lighthouses[0].rotationMatrix[0], solution.lighthouses[0].rotationMatrix[1], solution.lighthouses[0].rotationMatrix[2]);
+	printf("\t%f, %f, %f\n", solution.lighthouses[0].rotationMatrix[3], solution.lighthouses[0].rotationMatrix[4], solution.lighthouses[0].rotationMatrix[5]);
+	printf("\t%f, %f, %f\n", solution.lighthouses[0].rotationMatrix[6], solution.lighthouses[0].rotationMatrix[7], solution.lighthouses[0].rotationMatrix[8]);
+	printf("me:\n");
+	printf("\t01: %f\n", solution.lighthouses[0].error.err01);
+	printf("\t02: %f\n", solution.lighthouses[0].error.err02);
+	printf("\t03: %f\n", solution.lighthouses[0].error.err03);
+	printf("\t12: %f\n", solution.lighthouses[0].error.err12);
+	printf("\t13: %f\n", solution.lighthouses[0].error.err13);
+	printf("\t23: %f\n", solution.lighthouses[0].error.err23);
+	printf("\ttotal: %f\n", solution.lighthouses[0].error.total);
+	printf("so: %f, %f, %f\n", solution.lighthouses[1].origin[0], solution.lighthouses[1].origin[1], solution.lighthouses[1].origin[2]);
+	printf("sr:\n\t%f, %f, %f\n", solution.lighthouses[1].rotationMatrix[0], solution.lighthouses[1].rotationMatrix[1], solution.lighthouses[1].rotationMatrix[2]);
+	printf("\t%f, %f, %f\n", solution.lighthouses[1].rotationMatrix[3], solution.lighthouses[1].rotationMatrix[4], solution.lighthouses[1].rotationMatrix[5]);
+	printf("\t%f, %f, %f\n", solution.lighthouses[1].rotationMatrix[6], solution.lighthouses[1].rotationMatrix[7], solution.lighthouses[1].rotationMatrix[8]);
+	printf("se:\n");
+	printf("\t01: %f\n", solution.lighthouses[1].error.err01);
+	printf("\t02: %f\n", solution.lighthouses[1].error.err02);
+	printf("\t03: %f\n", solution.lighthouses[1].error.err03);
+	printf("\t12: %f\n", solution.lighthouses[1].error.err12);
+	printf("\t13: %f\n", solution.lighthouses[1].error.err13);
+	printf("\t23: %f\n", solution.lighthouses[1].error.err23);
+	printf("\ttotal: %f\n", solution.lighthouses[1].error.total);
+	printf("total error: %f\n", solution.totalError);
+	}
 }
 */
