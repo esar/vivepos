@@ -592,6 +592,8 @@ void solveLighthouse(lighthouse_solution_t* solution,
 	}
 	calcSolutionError(&solution->lighthouses[SLAVE].error, slavePoints);
 
+	solution->totalError = solution->lighthouses[MASTER].error.total +
+	                       solution->lighthouses[SLAVE].error.total;
 }
 
 uint8_t intersectLines(vec3_t origin1, vec3_t ray1,

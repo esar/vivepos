@@ -358,6 +358,7 @@ uint8_t processWindowSolveLighthouse()
 
 			if(g_solutions[index].totalError < (scalar_t)1.0)
 				g_solutions[index].totalError = calcTotalTriangulationError(&g_solutions[index]);
+			printf("S:Solution Error %.02f\r\n", g_solutions[index].totalError);
 
 			if(g_solutions[index].totalError < (scalar_t)1.0)
 			{
