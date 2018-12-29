@@ -275,24 +275,6 @@ void calcSolutionError(solution_error_t* errors, vec3_t points[4])
 */
 }
 
-void resetSolutionError(solution_error_t* error)
-{
-	error->err01 = 
-	error->err02 =
-	error->err03 = 
-	error->err12 = 
-	error->err13 =
-	error->err23 = 
-	error->total = 9999;
-}
-
-void invalidateSolution(lighthouse_solution_t* solution)
-{
-	resetSolutionError(&solution->lighthouses[MASTER].error);
-	resetSolutionError(&solution->lighthouses[SLAVE].error);
-	solution->totalError = 9999;
-}
-
 scalar_t residual(scalar_t a, scalar_t b, scalar_t c, scalar_t d)
 {
 	return a*a + b*b - 2*a*b*c - d*d;
@@ -303,8 +285,57 @@ scalar_t partial(scalar_t a, scalar_t b, scalar_t c)
 	return 2*(a - b*c);
 }
 
+void flipSolution(scalar_t distance[4])
+{
+	scalar_t max = 0;
+	scalar_t min = 100000;
+	uint8_t maxIndex;
+	uint8_t minIndex;
+	uint8_t i, j;
+
+	// Find the min and max distances
+	for(i = 0; i < 4; ++i)
+	{
+		if(distance[i] > max)
+		{
+			max = distance[i];
+			maxIndex = i;
+		}
+		if(distance[i] < min)
+		{
+			min = distance[i];
+			minIndex = i;
+		}
+	}
+	
+	// Flip min/max
+	max = distance[maxIndex];
+	distance[maxIndex] = distance[minIndex];
+	distance[minIndex] = max;
+
+	// Find and flip the other two distances
+	for(i = 0; i < 4; ++i)
+	{
+		if(i != maxIndex && i != minIndex)
+		{
+			for(j = i + 1; j < 4; ++j)
+			{
+				if(j != maxIndex && j != minIndex)
+				{
+					max = distance[i];
+					distance[i] = distance[j];
+					distance[j] = max;
+					break;
+				}
+			}
+			break;
+		}
+	}
+}
+
 // stack: local vars: 323 bytes, calling inv4: +52bytes
-void calcSensorPositions(vec3_t points[4], sensor_t* sensors, uint8_t lighthouse)
+void calcSensorPositions(vec3_t points[4], vec3_t sensorPlaneNormal,
+                         sensor_t* sensors, uint8_t lighthouse, vec3_t gravityVector)
 {
 	uint8_t i;
 	vec6_t r;
@@ -313,6 +344,7 @@ void calcSensorPositions(vec3_t points[4], sensor_t* sensors, uint8_t lighthouse
 	mat6_4_t tmpB;
 	scalar_t v01, v02, v03, v12, v13, v23;
 	scalar_t distance[4] = {1000.0, 1000.0, 1000.0, 1000.0};
+	vec3_t tmpPoints[4];
 
 
 	// Convert angles to vectors that point to sensors
@@ -401,17 +433,49 @@ void calcSensorPositions(vec3_t points[4], sensor_t* sensors, uint8_t lighthouse
 		}
 	}
 
+	// Detect and fix solutions that project out of the back of the lighthouse
+	if(distance[0] < 0)
+	{
+		printf("S:INVALID: inverted, fixing...\r\n");
+		distance[0] = 0 - distance[0];
+		distance[1] = 0 - distance[1];
+		distance[2] = 0 - distance[2];
+		distance[3] = 0 - distance[3];
+	}
+
 	// Scale the direction vectors to turn them into sensor coordinates
-	vec3Mul(points[0], points[0], distance[0]);
-	vec3Mul(points[1], points[1], distance[1]);
-	vec3Mul(points[2], points[2], distance[2]);
-	vec3Mul(points[3], points[3], distance[3]);
+	vec3Mul(tmpPoints[0], points[0], distance[0]);
+	vec3Mul(tmpPoints[1], points[1], distance[1]);
+	vec3Mul(tmpPoints[2], points[2], distance[2]);
+	vec3Mul(tmpPoints[3], points[3], distance[3]);
+
+	// Detect and fix solutions that have the lighthouse below the sensor plane
+	calcAverageSensorNormal(sensorPlaneNormal, tmpPoints);
+	if(vec3Dot(sensorPlaneNormal, gravityVector) >= 0)
+	{
+		printf("S:INVALID: below, fixing...\r\n");
+		flipSolution(distance);
+		vec3Mul(points[0], points[0], distance[0]);
+		vec3Mul(points[1], points[1], distance[1]);
+		vec3Mul(points[2], points[2], distance[2]);
+		vec3Mul(points[3], points[3], distance[3]);
+		calcAverageSensorNormal(sensorPlaneNormal, points);
+	}
+	else
+	{
+		memcpy(points[0], tmpPoints[0], sizeof(vec3_t));
+		memcpy(points[1], tmpPoints[1], sizeof(vec3_t));
+		memcpy(points[2], tmpPoints[2], sizeof(vec3_t));
+		memcpy(points[3], tmpPoints[3], sizeof(vec3_t));
+	}
 }
 
-uint8_t convertToMasterCoordinates(vec3_t slavePosition, 
-                                   mat3_3_t slaveRotation, 
-                                   vec3_t slavePoints[4],
-                                   vec3_t masterPoints[4])
+void convertToMasterCoordinates(vec3_t slavePosition, 
+                                mat3_3_t slaveRotation, 
+                                vec3_t slavePoints[4],
+                                vec3_t masterPoints[4],
+                                vec3_t masterSensorPlaneNormal,
+                                vec3_t slaveSensorPlaneNormal)
 {
 	uint8_t i;
 	mat3_3_t rotation, tmprot;
@@ -420,21 +484,8 @@ uint8_t convertToMasterCoordinates(vec3_t slavePosition,
 	scalar_t length;
 
 	
-	// Calculate sensor plane normal from slave's point of view
-	calcAverageSensorNormal(from, slavePoints);
-
-	// Calculate sensor plane normal from master's point of view
-	calcAverageSensorNormal(to, masterPoints);
-
-	// Check if both the master and slave sensor plane normal are pointing
-	// in the same approximate direction (less than 90 degrees apart). 
-	// If they're not then one of the solutions is probably coming up from 
-	// below the sensor plane, which is wrong, so bail out and reject the solution.
-	if(vec3Dot(from, to) <= 0)
-		return FALSE;
-
 	// Calculate rotation required to align slave normal to master
-	calcRotationMatrix(slaveRotation, from, to);
+	calcRotationMatrix(slaveRotation, slaveSensorPlaneNormal, masterSensorPlaneNormal);
 
 	// Find center of sensor plane from slave's point of view
 	calcPlaneCenter(from, slavePoints);
@@ -480,8 +531,6 @@ uint8_t convertToMasterCoordinates(vec3_t slavePosition,
 	// Rotate slaveRotation matrix
 	memcpy(tmprot, slaveRotation, 3*3*sizeof(scalar_t));
 	matDot(slaveRotation, rotation, 3, 3, tmprot, 3, 3);
-
-	return TRUE;
 }
 
 void rotateForGravity(vec3_t masterPosition, mat3_3_t masterRotation, vec3_t masterZ,
@@ -490,12 +539,12 @@ void rotateForGravity(vec3_t masterPosition, mat3_3_t masterRotation, vec3_t mas
 	vec3_t from, to;
 	mat3_3_t rotation, tmprot;
 
-	// Scale master z vector to unit vector and rotate into world
-	vec3Div(from, masterZ, vec3Len(masterZ));
+	// Rotate master z vector into world
+	memcpy(from, masterZ, sizeof(vec3_t));
 	matDot(masterZ, masterRotation, 3, 3, from, 3, 1);
 
-	// Scale slave z vector to unit vector and rotate into world
-	vec3Mul(from, slaveZ, (scalar_t)1.0 / vec3Len(slaveZ));
+	// Rotate slave z vector into world
+	memcpy(from, slaveZ, sizeof(vec3_t));
 	matDot(slaveZ, slaveRotation, 3, 3, from, 3, 1);
 
 	// Average the two z vectors
@@ -525,6 +574,8 @@ void solveLighthouse(lighthouse_solution_t* solution,
 	scalar_t distance;
 	vec3_t masterPoints[4];
 	vec3_t slavePoints[4];
+	vec3_t masterSensorPlaneNormal;
+	vec3_t slaveSensorPlaneNormal;
 	vec3_t masterZ =
 	{
 		ootx[MASTER].msg.accel_dir_x,
@@ -537,6 +588,10 @@ void solveLighthouse(lighthouse_solution_t* solution,
 		ootx[SLAVE].msg.accel_dir_y,
 		ootx[SLAVE].msg.accel_dir_z
 	};
+
+	// Scale accelerometer data to unit vector
+	vec3Div(masterZ, masterZ, vec3Len(masterZ));
+	vec3Div(slaveZ, slaveZ, vec3Len(slaveZ));
 
 	// Set master rotation matrix to identity
 	solution->lighthouses[0].rotationMatrix[0] = 1;
@@ -557,22 +612,20 @@ void solveLighthouse(lighthouse_solution_t* solution,
 	solution->lighthouses[0].origin[2] = 0;
 	
 	// Calculate the positions of the sensors as seen by the master lighthouse
-	calcSensorPositions(masterPoints, sensors, MASTER);
+	calcSensorPositions(masterPoints, masterSensorPlaneNormal, sensors, MASTER, masterZ);
 	// TODO: don't bother calculating error here, just check if
 	//       any values are NaN and bail early if they are
 	calcSolutionError(&solution->lighthouses[MASTER].error, masterPoints);
 
 	// Calculate the positions of the sensors as seen by the slave lighthouse
-	calcSensorPositions(slavePoints, sensors, SLAVE);
-	//calcSolutionError(slavePoints);
+	calcSensorPositions(slavePoints, slaveSensorPlaneNormal, sensors, SLAVE, slaveZ);
+	calcSolutionError(&solution->lighthouses[SLAVE].error, slavePoints);
 
 	// Convert the slave positions/rotations to the master's coordinate space
-	if(!convertToMasterCoordinates(solution->lighthouses[1].origin, solution->lighthouses[1].rotationMatrix, 
-	                               slavePoints, masterPoints))
-	{
-		invalidateSolution(solution);
-		return;
-	}
+	convertToMasterCoordinates(solution->lighthouses[1].origin, 
+	                           solution->lighthouses[1].rotationMatrix, 
+	                           slavePoints, masterPoints,
+	                           masterSensorPlaneNormal, slaveSensorPlaneNormal);
 
 	// Rotate everything for the gravity direction from the lighthouse accelerometer data
 	rotateForGravity(solution->lighthouses[0].origin, solution->lighthouses[0].rotationMatrix, masterZ, 
@@ -684,6 +737,81 @@ uint8_t calcPosition(lighthouse_t* lighthouses,
 	return intersectLines(lighthouses[0].origin, ray1, lighthouses[1].origin, ray2, result, distance);
 }
 
+
+#ifdef TEST_POSITION
+scalar_t ticksToAngle(uint16_t ticks)
+{
+	return ((scalar_t)ticks - SWEEP_CENTER_IN_TICKS) * (M_PI / SWEEP_180_IN_TICKS);
+}
+
+void main(int argc, char**argv)
+{
+	int i;
+	uint16_t samples[16];
+	lighthouse_solution_t solution;
+	sensor_t sensors[4];
+	ootx_msg_t ootx[2];
+
+	if(argc != 17)
+	{
+		fprintf(stderr, "wrong number of angles: %u\n", argc - 1);
+		return;
+	}
+
+	sensors[0].angleRadians[0][0] = ticksToAngle(atoi(argv[1]));
+	sensors[0].angleRadians[0][1] = ticksToAngle(atoi(argv[2]));
+	sensors[1].angleRadians[0][0] = ticksToAngle(atoi(argv[3]));
+	sensors[1].angleRadians[0][1] = ticksToAngle(atoi(argv[4]));
+	sensors[2].angleRadians[0][0] = ticksToAngle(atoi(argv[5]));
+	sensors[2].angleRadians[0][1] = ticksToAngle(atoi(argv[6]));
+	sensors[3].angleRadians[0][0] = ticksToAngle(atoi(argv[7]));
+	sensors[3].angleRadians[0][1] = ticksToAngle(atoi(argv[8]));
+	sensors[0].angleRadians[1][0] = ticksToAngle(atoi(argv[9]));
+	sensors[0].angleRadians[1][1] = ticksToAngle(atoi(argv[10]));
+	sensors[1].angleRadians[1][0] = ticksToAngle(atoi(argv[11]));
+	sensors[1].angleRadians[1][1] = ticksToAngle(atoi(argv[12]));
+	sensors[2].angleRadians[1][0] = ticksToAngle(atoi(argv[13]));
+	sensors[2].angleRadians[1][1] = ticksToAngle(atoi(argv[14]));
+	sensors[3].angleRadians[1][0] = ticksToAngle(atoi(argv[15]));
+	sensors[3].angleRadians[1][1] = ticksToAngle(atoi(argv[16]));
+
+	ootx[MASTER].msg.accel_dir_x = 5;
+	ootx[MASTER].msg.accel_dir_y = 127;
+	ootx[MASTER].msg.accel_dir_z = 2;
+	ootx[SLAVE].msg.accel_dir_x = -127;
+	ootx[SLAVE].msg.accel_dir_y = 34;
+	ootx[SLAVE].msg.accel_dir_z = 78;
+
+	solveLighthouse(&solution, sensors, ootx);
+
+	printf("mo: %f, %f, %f\n", solution.lighthouses[0].origin[0], solution.lighthouses[0].origin[1], solution.lighthouses[0].origin[2]);
+	printf("mr:\n");
+	printf("\t%f, %f, %f\n", solution.lighthouses[0].rotationMatrix[0], solution.lighthouses[0].rotationMatrix[1], solution.lighthouses[0].rotationMatrix[2]);
+	printf("\t%f, %f, %f\n", solution.lighthouses[0].rotationMatrix[3], solution.lighthouses[0].rotationMatrix[4], solution.lighthouses[0].rotationMatrix[5]);
+	printf("\t%f, %f, %f\n", solution.lighthouses[0].rotationMatrix[6], solution.lighthouses[0].rotationMatrix[7], solution.lighthouses[0].rotationMatrix[8]);
+	printf("me:\n");
+	printf("\t01: %f\n", solution.lighthouses[0].error.err01);
+	printf("\t02: %f\n", solution.lighthouses[0].error.err02);
+	printf("\t03: %f\n", solution.lighthouses[0].error.err03);
+	printf("\t12: %f\n", solution.lighthouses[0].error.err12);
+	printf("\t13: %f\n", solution.lighthouses[0].error.err13);
+	printf("\t23: %f\n", solution.lighthouses[0].error.err23);
+	printf("\ttotal: %f\n", solution.lighthouses[0].error.total);
+	printf("so: %f, %f, %f\n", solution.lighthouses[1].origin[0], solution.lighthouses[1].origin[1], solution.lighthouses[1].origin[2]);
+	printf("sr:\n\t%f, %f, %f\n", solution.lighthouses[1].rotationMatrix[0], solution.lighthouses[1].rotationMatrix[1], solution.lighthouses[1].rotationMatrix[2]);
+	printf("\t%f, %f, %f\n", solution.lighthouses[1].rotationMatrix[3], solution.lighthouses[1].rotationMatrix[4], solution.lighthouses[1].rotationMatrix[5]);
+	printf("\t%f, %f, %f\n", solution.lighthouses[1].rotationMatrix[6], solution.lighthouses[1].rotationMatrix[7], solution.lighthouses[1].rotationMatrix[8]);
+	printf("se:\n");
+	printf("\t01: %f\n", solution.lighthouses[1].error.err01);
+	printf("\t02: %f\n", solution.lighthouses[1].error.err02);
+	printf("\t03: %f\n", solution.lighthouses[1].error.err03);
+	printf("\t12: %f\n", solution.lighthouses[1].error.err12);
+	printf("\t13: %f\n", solution.lighthouses[1].error.err13);
+	printf("\t23: %f\n", solution.lighthouses[1].error.err23);
+	printf("\ttotal: %f\n", solution.lighthouses[1].error.total);
+	printf("total error: %f\n", solution.totalError);
+}
+#endif
 
 /*
 scalar_t ticksToAngle(uint16_t ticks)
