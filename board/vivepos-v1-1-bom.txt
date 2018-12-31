@@ -1,0 +1,47 @@
+Resistors (all 1% 0402 SMD)
+===========================
+33R        R7,R8,R21,R34,R35,R48,R57,R58,R71,R80,R81,R94
+560R       R6,R33,R56,R79
+100K       R17,R24,R25,R26,R44,R67,R90,R101,R102,R103
+10K        R1,R2,R28,R29,R51,R52,R74,R75,R97,R98,R99,R100
+12K        R18,R45,R68,R91
+15K        R9,R14,R36,R41,R59,R64,R82,R87
+1K         R11,R15,R27,R38,R42,R61,R65,R84,R88,R104
+1K2        R23,R50,R73,R96
+1K5        R4,R31,R54,R77
+2K7        R12,R16,R39,R43,R62,R66,R85,R89
+56K        R19,R20,R46,R47,R69,R70,R92,R93
+5K6        R22,R49,R72,R95
+6K8        R10,R13,R37,R40,R60,R63,R83,R86
+8K2        R3,R5,R30,R32,R53,R55,R76,R78
+
+Capacitors (Ceramic 0402 SMD)
+=====================
+100nF      C1,C2,C5,C7,C9,C11,C12,C13,C14,C15,C18,C20,C22,C24,C25,C26,C29,C31,C33,C35,C36,C37,C40,C42,C44,C46
+100pF      C3,C10,C16,C23,C27,C34,C38,C45
+1nF        C4,C6,C8,C17,C19,C21,C28,C30,C32,C39,C41,C43,C49,C50
+
+Capacitors (other)
+=================
+2.2uF    Ceramic 0805                                                     C47
+4.7uF    16V Tantalum (Kemet B45196E3475K209, no longer manufactured)     C48
+
+Diodes
+======
+Photo-diode BPW32S             D1,D2,D3,D4
+Schottky    PMEG3010EJ.115     D5,D6
+
+Semiconductors
+==============
+Microcontroller ATMEGA3209     U$2
+Quad Comparator LM339PT        IC2
+Dual NPN/PNP    MBT3946DWDW    T13,T14,T15,T16,T17,T18,T19,T20,T21,T22,T23,T24
+USB Serial      MCP2221        U$1
+3V3 regulator   TPS76933DBVT   IC1
+
+Connectors
+==========
+PINHD-1X2                     JP1
+PINHD-1X3                     JP3
+USB Amphenol 10103594-0001LF  JP2
+
