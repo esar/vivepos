@@ -1,0 +1,29 @@
+This repository contains the PCB design and firmware for
+a stanalone position sensor for use with the VIVE VR system.
+
+ * 4 sensors, 30 positions/s each
+ * Totally standalone, works out lighthouse positions for itself
+ * No configuration, apply power... get position data
+ * Accounts for gravity direction using accelerometer data from lighthouses
+ * Output sent via USB serial and/or UART
+ * Running on a 20MHz AVR
+
+For latest version and full description, go to:
+http://hacks.esar.org.uk/vive-position-sensor/
+
+
+How to use:
+
+1) Manufacture the board that can be found in the 'board' directory 
+   (CADSoft Eagle format).
+2) Edit Makefile and change paths to tools:
+   CCDEVS, CCINC, CC, OBJCOPY, OBJDUMP
+3) Run 'make' to build the firmware
+4) Write firmware to board, e.g.:
+   avrdude -c jtag2updi -P /dev/ttyACM1 -p m3209 -U flash:w:image.hex
+5) Connect USB (or power+UART) to board
+6) The board should start outputing position data shortly after
+   the lighthouses become visible to it.
+7) Use the solve-lighthouse.py script to pretty print the data stream:
+   ./solve-lighthouse.py --dump-pos --dump-sensor=0 /dev/ttyACM0
+
